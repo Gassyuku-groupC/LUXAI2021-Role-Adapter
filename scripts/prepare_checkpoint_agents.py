@@ -66,9 +66,15 @@ def split_role_bias_state(state: dict) -> tuple[dict, dict[str, float]]:
     return model_state, role_biases
 
 
-def resolved_model_config(root: Path) -> dict:
+def is_role_local_state(state: dict) -> bool:
+    return any(name.startswith("role_local_adapter.") for name in state)
+
+
+def resolved_model_config(root: Path, role_local: bool = False) -> dict:
     with initialize_config_dir(config_dir=str((root / "conf").resolve()), version_base=None):
-        config = compose(config_name="conv_sidecar_appo_vtrace")
+        config = compose(
+            config_name="conv_role_curriculum_stage4" if role_local else "conv_sidecar_appo_vtrace"
+        )
     data = OmegaConf.to_container(config, resolve=True)
     data["load_dir"] = None
     data["checkpoint_file"] = "candidate_weights.pt"
@@ -101,7 +107,13 @@ def build_agent(
     )
     shutil.copy2(root / "main.py", output / "main.py")
     rl_dir = output / "lux_ai" / "rl_agent"
-    model_state, learned_role_biases = split_role_bias_state(load_model_state(checkpoint))
+    raw_state = load_model_state(checkpoint)
+    role_local = is_role_local_state(raw_state)
+    if role_local:
+        model_state, learned_role_biases = raw_state, {}
+        config = resolved_model_config(root, role_local=True)
+    else:
+        model_state, learned_role_biases = split_role_bias_state(raw_state)
     torch.save({"model_state_dict": model_state}, rl_dir / "candidate_weights.pt")
     (rl_dir / "config.yaml").write_text(
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
@@ -119,7 +131,7 @@ def build_agent(
         agent_config_path.write_text(
             yaml.safe_dump(agent_config, sort_keys=False), encoding="utf-8"
         )
-    if enable_role_adapter:
+    if enable_role_adapter or role_local:
         agent_config_path = rl_dir / "rl_agent_config.yaml"
         agent_config = yaml.safe_load(agent_config_path.read_text(encoding="utf-8")) or {}
         role_config = agent_config.setdefault("role_assignment", {})
@@ -132,9 +144,10 @@ def build_agent(
             "annotate_summary": False,
             "cooldown_turns": 5,
             "firefighter_override_cooldown": True,
-            "bias_disabled_map_sizes": [],
+            "preserve_build_city_logit": True,
+            "bias_disabled_map_sizes": [12],
             "bias_disabled_players_by_map": {},
-            "bias_scale_by_map_size": {12: 0.35, 16: 1.0, 24: 0.35, 32: 0.25},
+            "bias_scale_by_map_size": {12: 0.0, 16: 0.60, 24: 0.50, 32: 0.30},
             "max_biased_workers_by_map_size": {12: 32, 16: 64, 24: 64, 32: 64},
             "safety_only_map_sizes": [],
             "update_time_budget_seconds": 1.5,

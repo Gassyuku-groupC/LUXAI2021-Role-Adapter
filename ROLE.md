@@ -1,151 +1,74 @@
-# Role and City Adapter
+# Role-City Adapter
 
-## Purpose
+## Status
 
-`RoleCityAdapter` is an optional policy adapter applied after Actor inference and
-before action selection. It does not change the observation space, legacy Actor
-parameter names, or base checkpoint. The adapter can therefore be enabled for
-experiments and disabled to recover the reproduced `best_agent` policy.
-
-The module is experimental and is disabled by default.
+Role-City is the core innovation enabled in the current `role_05376 + Rot180` baseline. It is a plug-and-play policy adapter outside the legacy Actor checkpoint. Spatial Sidecar and Risk Gate are separate optional research modules and are OFF in the promoted runtime.
 
 ## Data Flow
 
 ```text
-base Actor logits
-  + per-turn unit roles and city specializations
-  + configured or learned role biases
-  -> legal-mask-respecting biased logits
+Actor logits
+  -> Rot180 aggregation
+  -> RoleCityAdapter.update(game state)
+  -> additive role/city soft bias
+  -> legal-action mask
   -> action selection
 ```
 
-`RoleCityAdapter.update(...)` refreshes assignments and cooldown state once per
-turn. `RoleCityAdapter.apply(...)` adds biases only to legal actions. An adapter
-with `enabled: false` returns the original logits object unchanged.
+`update(...)` refreshes assignments and cooldown state once per turn. `apply(...)` changes legal logits only. Disabling the adapter restores the Actor path without changing the observation space or Actor state dictionary.
 
-## Assignments
+## Worker Roles
 
-Worker roles are `Harvester`, `Builder`, `Attacker`, and `Firefighter`. City
-specializations are `FuelDepot`, `FuelStation`, `ResearchStation`,
-`ManufacturingPoint`, and `SacrificialDecay`.
+- `Harvester`: positive guidance toward mining and resource access.
+- `Builder`: positive guidance for expansion opportunities.
+- `Firefighter`: movement and adjacent-unit relay guidance toward a critical city.
+- `Attacker`: lowest-priority positional pressure after economic and survival roles are assigned.
 
-Assignments use a five-turn cooldown to avoid oscillation. Firefighter may
-override cooldown only for a critical city that has not been classified as
-`SacrificialDecay`. FuelDepot represents a combined transport hub rather than
-the nearest fuel tile.
+Role changes normally wait five turns. Firefighter may override cooldown only for a critical city that is not `SacrificialDecay`.
 
-Lux 2021 transfer semantics are preserved: a worker can transfer resources only
-to an adjacent allied unit. Firefighter transfer bias is added only when that
-adjacent relay is no farther from the critical city. The adapter never assumes
-that a worker can transfer fuel directly to a city tile.
+## City Roles
 
-## Configuration
+- `FuelDepot`: combined transport hub using normalized fuel access and city centrality.
+- `FuelStation`: fuel-oriented support city.
+- `ResearchStation`: research priority.
+- `ManufacturingPoint`: worker production priority.
+- `SacrificialDecay`: strictly bounded abandonment candidate.
 
-The deployment default in `rl_agent_config.yaml` is:
+SacrificialDecay is limited to at most one city and requires a single city tile, zero fuel turns, repeated confirmation, no timely rescue, and sufficient distance from fuel resources. It does not hard-delete legal actions or force the Actor to abandon a city.
 
-```yaml
-role_assignment:
-  enabled: false
-  dry_run_logging: false
-  bias_enabled: false
-  learnable_biases: false
-  bias_params_path: role_city_bias_params.yaml
-  annotate_summary: false
-  cooldown_turns: 5
-  firefighter_override_cooldown: true
-  update_time_budget_seconds: 1.5
-```
+## Lux Constraints
 
-Fixed deployment coefficients live in `role_city_bias_params.yaml`. A separate
-role-enabled package can be generated with:
+Lux workers transfer only to adjacent allied units. Firefighter transfer bias therefore targets an adjacent relay that is at least as close to the critical city. The adapter never assumes direct worker-to-city transfer.
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\prepare_checkpoint_agents.py `
-  --checkpoint best_actor_sidecar_roles=outputs\best_actor_sidecar\best_actor_sidecar_zero_delta.pt `
-  --disable-risk-gate `
-  --preserve-runtime-config `
-  --enable-role-adapter
-```
+BUILD_CITY is a protected Actor capability. `preserve_build_city_logit: true` prevents fixed Attacker and Firefighter BUILD_CITY penalties. Future critical-state learning must not introduce a global BUILD_CITY suppression rule.
 
-## Learning Path
+## Runtime Engineering
 
-With `learnable_biases: true`, the 14 coefficients are represented by an
-`nn.ParameterDict` and receive gradients through biased logits. Competitive
-training should proceed in controlled stages:
+- compact NumPy role codes and cooldown-expiry arrays;
+- broadcast Manhattan distance and direction calculation;
+- board-grid neighbor lookup instead of all-pairs transfer search;
+- bounded per-map worker budgets and role scales;
+- previous-assignment reuse when the update budget is exceeded;
+- role trace fields for update time, degradation, cooldown, role change, and reason.
 
-1. Train Role Adapter parameters while Actor and Sidecar remain frozen.
-2. Train Role Adapter and Sidecar while keeping the legacy Actor frozen.
-3. Jointly fine-tune Actor, Sidecar, and Role Adapter with separate learning
-   rates and a frozen `best_agent` KL reference.
+Attacker is processed last. Completed research short-circuits research-oriented city work. Runtime failures are evaluated separately from normal per-turn model inference.
 
-Recommended initial learning-rate ranges are `1e-7` to `5e-7` for Actor,
-`5e-7` to `2e-6` for Sidecar, and `5e-6` to `2e-5` for Role Adapter. Exposing
-parameters is not sufficient by itself. The Role-only learner now transports a
-compact signed action-to-parameter code with each rollout, reconstructs the
-role Logit Delta in the learner, and saves the 14 parameters with optimizer and
-checkpoint state. Actor, Sidecar, and Gate tensors remain frozen in this stage.
+## Learning Interface
 
-The Role-only repair configuration is `conf/conv_role_only_repair.yaml`. It uses
-the reproduced best Actor plus zero-delta Sidecar as its student start, fixes
-`best_agent` as the KL teacher, gives 12x12 a low policy weight as an anchor, and
-up-weights turns 25-39 on 16x16 and 24x24. Learned values can be exported to the
-runtime adapter YAML with `scripts/export_role_bias_checkpoint.py`.
+The 14 role coefficients can be fixed YAML values or `nn.ParameterDict` parameters. `RoleConditionedLocalAdapter` can add a bounded learned local delta while the Actor remains frozen. Learner rollout buffers transport compact role codes; checkpoints include role/local tensors and optimizer state.
 
-## Bounded Multi-Map Runtime
+The allowed progression is:
 
-Role assignment and learned role/city biases run on all four map sizes. Per-map
-bias scales and worker budgets bound strategy drift and runtime cost; Attacker
-is processed only after Firefighter, Builder, and Harvester. A safety-only mode
-remains configurable for experiments but is empty in generated deployment
-packages.
+1. Role bias plus Local Adapter on critical states.
+2. Final policy head if the small adapter cannot alter target decisions.
+3. ResNet blocks 23-24 only after explicit evaluation gates.
 
-This replaces the earlier whole-map disable and safety-only switches. Full-role
-smokes completed under the 300-second cap on 12x12, 16x16, 24x24, and 32x32.
-Some map/seed/side combinations can still stall inside the Lux engine without
-producing command output; those failures are tracked separately from adapter
-latency.
+Global full-frame BC and the Stage4 continuation are retired. Strict DPO requires preferred and rejected legal actions on the same observation. Replay-only B/G examples from different states are weak preference or focal-BC samples.
 
-Attacker has the lowest runtime bias priority. Cooldowns use compact NumPy
-arrays, nearest-target distances and directions use broadcast matrices, and
-adjacent transfer lookup uses a board-sized unit grid. Fixed biases are applied
-to cloned logits with a single batched in-place update before the legal mask is
-reapplied. Completed research skips research-oriented city biases. When an
-update exceeds `update_time_budget_seconds`, the next turn reuses the previous
-assignment; role traces record `update_seconds` and `update_degraded` for
-latency audits.
+## Evaluation
 
-## Replay Overlay
+Use the preregistered Development, Promotion, and Holdout suites in `conf/evaluation/paired_seed_suites.yaml`. Every seed is run from both positions. Promotion requires preserved 16-map strength, improved or maintained 24/32 performance, no material BUILD_CITY decline, controlled worst-night loss, and no timeout regression.
 
-Local replay generation writes the candidate player's actual cooldown-adjusted
-assignments to a matching `*.roles.json` file. Each frame includes unit and city
-roles, desired role, cooldown, assignment-change flag, reason, tile positions,
-and whether the learned bias was active.
+## Replay Visualization
 
-Open `tools/role_replay_viewer/index.html`, then select the converted stateful
-replay and matching role sidecar. The offline viewer provides role colors,
-unit/city and team filters, hover details, playback speed, and turn controls.
-Pass `-DisableRoleTrace` to `generate_deployed_agent_replays.ps1` when role
-sidecars are not needed.
-
-## Historical A/B Evidence
-
-The following early result used a package that did not preserve the base
-agent's `Rot180` runtime augmentation. It is retained only as historical
-evidence that the adapter executed; it must not be used for promotion.
-
-The first paired fixed-seed evaluation against `best_agent` completed six games
-on 12x12, 16x16, and 24x24. Both 32x32 games hit the existing 900-second Lux
-evaluation timeout.
-
-| Map | Record | Paired city margin | Paired unit margin |
-| --- | ---: | ---: | ---: |
-| 12x12 | 1-1 | +19 | +19 |
-| 16x16 | 2-0 | +16 | +12 |
-| 24x24 | 1-1 | 0 | -26 |
-
-Across completed games the result was 4-2 with mean city margin `+5.83` and mean
-unit margin `+0.83`. BUILD_CITY increased from the reproduced baseline's `88.5`
-to `110.3` per game. The 24x24 games recorded worst-night city losses of 169 and
-175, so this small result is evidence that the adapter is operational, not proof
-that it is stronger than `best_agent`. Fresh-seed replication and night-loss
-control are required before promotion.
+Replay generation can emit a matching `*.roles.json` sidecar containing per-turn unit/city roles, cooldowns, changes, reasons, and bias status. Viewer code is maintained separately from the training repository; role trace generation remains here because it is part of evaluation and diagnosis.

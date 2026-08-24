@@ -15,6 +15,7 @@ from lux_ai.rl_agent.role_assignment import (
     HARVESTER,
     RoleAssignmentConfig,
     RoleCityBiasParams,
+    SACRIFICIAL_DECAY,
 )
 from lux_ai.rl_agent.role_city_adapter import ROLE_BIAS_PRIORITY, RoleCityAdapter, pos_to_loc
 from lux_ai.rl_agent.trainable_role_bias import ROLE_BIAS_INDEX, TrainableRoleBiasLayer
@@ -109,6 +110,11 @@ class RoleCityAdapterTests(unittest.TestCase):
             [FIREFIGHTER, BUILDER, HARVESTER, ATTACKER],
         )
 
+    def test_build_city_protection_round_trips_from_config(self):
+        config = RoleAssignmentConfig.from_mapping({"preserve_build_city_logit": True})
+        self.assertTrue(config.preserve_build_city_logit)
+        self.assertTrue(config.to_mapping()["preserve_build_city_logit"])
+
     def test_cooldown_uses_compact_arrays_and_skips_reassignment(self):
         game = self.make_game(turn=10)
         player, opponent = Player(0), Player(1)
@@ -123,6 +129,50 @@ class RoleCityAdapterTests(unittest.TestCase):
         self.assertIsInstance(adapter.state.role_codes, np.ndarray)
         self.assertEqual(second.unit_roles["u0"].role, first.unit_roles["u0"].role)
         self.assertEqual(second.unit_roles["u0"].reason, "cooldown_reuse")
+
+    def test_sacrificial_city_never_triggers_at_turn_zero(self):
+        game = self.make_game(turn=0)
+        player, opponent = Player(0), Player(1)
+        self.add_city(player, "c0", 1, 1, fuel=0, upkeep=10)
+        adapter = RoleCityAdapter.from_config(RoleAssignmentConfig(enabled=True))
+
+        snapshot = adapter.update(game_state=game, player=player, opponent=opponent)
+
+        self.assertNotEqual(snapshot.city_roles["c0"].role, SACRIFICIAL_DECAY)
+        self.assertFalse(snapshot.city_roles["c0"].abandon)
+
+    def test_sacrificial_city_requires_confirmation_and_obeys_cap(self):
+        game = self.make_game(turn=30)
+        player, opponent = Player(0), Player(1)
+        for index in range(12):
+            self.add_city(player, f"c{index}", index, 0, fuel=0, upkeep=10)
+        adapter = RoleCityAdapter.from_config(
+            RoleAssignmentConfig(enabled=True, abandon_confirmation_turns=3)
+        )
+
+        first = adapter.update(game_state=game, player=player, opponent=opponent)
+        game.turn = 31
+        second = adapter.update(game_state=game, player=player, opponent=opponent)
+        game.turn = 32
+        third = adapter.update(game_state=game, player=player, opponent=opponent)
+
+        self.assertEqual(len(first.abandoned_city_ids), 0)
+        self.assertEqual(len(second.abandoned_city_ids), 0)
+        self.assertEqual(len(third.abandoned_city_ids), 1)
+
+    def test_nearby_fuel_prevents_sacrificial_assignment(self):
+        game = self.make_game(turn=30)
+        player, opponent = Player(0), Player(1)
+        for index in range(3):
+            self.add_city(player, f"c{index}", index, 0, fuel=0, upkeep=10)
+        game.map._setResource("wood", 0, 1, 500)
+        adapter = RoleCityAdapter.from_config(
+            RoleAssignmentConfig(enabled=True, abandon_confirmation_turns=1)
+        )
+
+        snapshot = adapter.update(game_state=game, player=player, opponent=opponent)
+
+        self.assertNotEqual(snapshot.city_roles["c0"].role, SACRIFICIAL_DECAY)
 
     def test_update_budget_reuses_previous_snapshot_for_one_turn(self):
         game = self.make_game(turn=10)

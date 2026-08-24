@@ -46,7 +46,12 @@ class TrainableRoleBiasLayer(nn.Module):
             for name in ROLE_BIAS_NAMES
         })
 
-    def forward(self, policy_logits: Dict[str, torch.Tensor], role_codes: Dict[str, torch.Tensor]):
+    def forward(
+            self,
+            policy_logits: Dict[str, torch.Tensor],
+            role_codes: Dict[str, torch.Tensor],
+            role_scale: torch.Tensor | None = None,
+    ):
         output = {}
         for space, logits in policy_logits.items():
             codes = role_codes.get(space)
@@ -59,6 +64,8 @@ class TrainableRoleBiasLayer(nn.Module):
                 value = self.bias_params[name].to(dtype=logits.dtype)
                 delta = delta + (codes == index).to(logits.dtype) * value
                 delta = delta - (codes == -index).to(logits.dtype) * value
+            if role_scale is not None:
+                delta = delta * role_scale.to(device=delta.device, dtype=delta.dtype)
             output[space] = logits + delta
         return output
 
@@ -94,6 +101,21 @@ class RoleBiasCodeBuilder:
                     config=self.config,
                 )
                 self._write_player(codes, env_index, game, player, opponent, snapshot)
+        return codes
+
+    def build_player_from_snapshot(
+            self,
+            game,
+            player,
+            opponent,
+            snapshot,
+            available_actions_mask: Dict[str, torch.Tensor],
+    ):
+        codes = {
+            space: torch.zeros_like(mask, dtype=torch.int8)
+            for space, mask in available_actions_mask.items()
+        }
+        self._write_player(codes, 0, game, player, opponent, snapshot)
         return codes
 
     @staticmethod
@@ -134,14 +156,16 @@ class RoleBiasCodeBuilder:
                 direction = direction_towards(worker.pos, target)
                 if direction is not None:
                     self._set(codes, "worker", env_index, player_id, x, y, f"MOVE_{direction}", "attacker_block_move_bias")
-                self._set(codes, "worker", env_index, player_id, x, y, "BUILD_CITY", "attacker_build_city_penalty", -1)
+                if not self.config.preserve_build_city_logit:
+                    self._set(codes, "worker", env_index, player_id, x, y, "BUILD_CITY", "attacker_build_city_penalty", -1)
             elif assignment.role == FIREFIGHTER:
                 target = nearest_critical_city_center(player, snapshot, worker.pos)
                 direction = direction_towards(worker.pos, target)
                 if direction is not None:
                     self._set(codes, "worker", env_index, player_id, x, y, f"MOVE_{direction}", "firefighter_move_bias")
                 self._write_transfers(codes, env_index, player, worker, target)
-                self._set(codes, "worker", env_index, player_id, x, y, "BUILD_CITY", "firefighter_build_city_penalty", -1)
+                if not self.config.preserve_build_city_logit:
+                    self._set(codes, "worker", env_index, player_id, x, y, "BUILD_CITY", "firefighter_build_city_penalty", -1)
 
         for (x, y), role in city_tile_roles(player, snapshot).items():
             tile = game.map.get_cell(x, y).citytile
@@ -185,5 +209,8 @@ def attach_role_bias_codes(env_output, env, builder: RoleBiasCodeBuilder):
     updated = dict(env_output)
     info = dict(env_output["info"])
     info["role_bias_codes"] = builder.build(env, info["available_actions_mask"])
+    envs = list(iter_lux_envs(env))
+    scales = [builder.config.bias_scale_for(item.game_state.map_width) for item in envs]
+    info["role_bias_scale"] = torch.tensor(scales, dtype=torch.float32).view(-1, 1, 1, 1, 1, 1)
     updated["info"] = info
     return updated

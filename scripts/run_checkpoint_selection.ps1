@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("phase1", "phase2", "rescue", "distill", "repro")]
+    [ValidateSet("phase1", "phase2", "rescue", "distill", "repro", "rolelocal", "stageA", "stage4", "rot180")]
     [string]$Phase = "phase1",
     [string[]]$Checkpoints = @("bc", "10816", "20128", "30272", "40288", "50112", "60288", "70560"),
     [int[]]$Seeds = @(20260824),
     [int[]]$MapSizes = @(),
     [int]$AgentTurnTimeoutMs = 30000,
-    [int]$TimeoutSeconds = 1200,
+    [int]$TimeoutSeconds = 240,
+    [int]$MaxAttempts = 1,
+    [int]$RetryDelaySeconds = 5,
+    [switch]$DisableRoleTrace,
     [switch]$SkipPackaging
 )
 
@@ -20,12 +23,12 @@ $Checkpoints = @(
 $Root = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 $Agents = Join-Path $Root "outputs\checkpoint_selection\agents"
-$EvalOpponents = Join-Path $Root "outputs\checkpoint_selection\eval_opponents"
 $PhaseRoot = Join-Path $Root "outputs\checkpoint_selection\$Phase"
+$EvalOpponents = Join-Path $PhaseRoot "_eval_opponents"
 if ($MapSizes.Count -eq 0) {
     $MapSizes = if ($Phase -eq "phase1") { @(12, 24) } else { @(12, 16, 24, 32) }
 }
-$Opponents = if ($Phase -in @("phase1", "rescue", "distill", "repro")) { @("best_agent") } else { @("best_agent", "first", "stage350", "stage400") }
+$Opponents = if ($Phase -in @("phase1", "rescue", "distill", "repro", "rolelocal", "stageA", "stage4", "rot180")) { @("best_agent") } else { @("best_agent", "first", "stage350", "stage400") }
 
 if (-not $SkipPackaging) {
     & $Python (Join-Path $PSScriptRoot "prepare_checkpoint_agents.py")
@@ -34,6 +37,7 @@ if (-not $SkipPackaging) {
 
 & $Python (Join-Path $PSScriptRoot "prepare_checkpoint_eval_runtime.py") `
     --candidate-root $Agents `
+    --candidate-names $Checkpoints `
     --opponent-root $EvalOpponents `
     --best-agent (Join-Path $Root "outputs\submission_packages\best_agent") `
     --first-agent (Join-Path $Root "internal_testing\hall_of_fame\11-24_12-56-23_062179520_must_research") `
@@ -61,6 +65,9 @@ foreach ($checkpoint in $Checkpoints) {
         -OutputDir $output `
         -AgentTurnTimeoutMs $AgentTurnTimeoutMs `
         -TimeoutSeconds $TimeoutSeconds `
+        -MaxAttempts $MaxAttempts `
+        -RetryDelaySeconds $RetryDelaySeconds `
+        -DisableRoleTrace:$DisableRoleTrace `
         -ContinueOnFailure
     $manifestPath = Join-Path $output "manifest.json"
     if (-not (Test-Path -LiteralPath $manifestPath)) {

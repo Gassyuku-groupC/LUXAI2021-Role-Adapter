@@ -18,6 +18,9 @@ def set_device(agent_dir: Path, device: str) -> None:
 
 
 def copy_agent(source: Path, destination: Path, device: str) -> None:
+    if (destination / "main.py").is_file():
+        set_device(destination, device)
+        return
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination)
@@ -27,6 +30,7 @@ def copy_agent(source: Path, destination: Path, device: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate-root", type=Path, required=True)
+    parser.add_argument("--candidate-names", nargs="+", default=None)
     parser.add_argument("--opponent-root", type=Path, required=True)
     parser.add_argument("--best-agent", type=Path, required=True)
     parser.add_argument("--first-agent", type=Path, required=True)
@@ -40,7 +44,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    for candidate in args.candidate_root.iterdir():
+    candidates = (
+        (args.candidate_root / name for name in args.candidate_names)
+        if args.candidate_names
+        else args.candidate_root.iterdir()
+    )
+    for candidate in candidates:
         if candidate.is_dir() and (candidate / "main.py").exists():
             set_device(candidate, "cuda:0")
 
