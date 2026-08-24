@@ -156,7 +156,25 @@ def _create_model(
         ),
     )
     model = model.to(device=device)
-    if getattr(flags, "spatial_risk_sidecar_enabled", False):
+    if getattr(flags, "role_local_adapter_enabled", False):
+        from ..rl_agent.role_assignment import RoleCityBiasParams
+        from ..rl_agent.role_conditioned_local_adapter import (
+            RoleConditionedLocalAdapter,
+            RoleLocalAgentWrapper,
+        )
+        from ..rl_agent.trainable_role_bias import TrainableRoleBiasLayer
+        model = RoleLocalAgentWrapper(
+            model,
+            TrainableRoleBiasLayer(
+                RoleCityBiasParams.from_mapping(getattr(flags, "role_bias_initial", None))
+            ).to(device),
+            RoleConditionedLocalAdapter(
+                feature_channels=flags.hidden_dim,
+                hidden_channels=getattr(flags, "role_local_hidden_channels", 16),
+                max_delta=getattr(flags, "role_local_max_delta", 0.25),
+            ).to(device),
+        ).to(device)
+    elif getattr(flags, "spatial_risk_sidecar_enabled", False):
         from ..rl_agent.learned_intervention_gate import SidecarLogitDeltaGate
         from ..rl_agent.sidecar_agent_wrapper import SidecarAgentWrapper
         from ..rl_agent.spatial_risk_sidecar import SpatialRiskAttentionSidecar

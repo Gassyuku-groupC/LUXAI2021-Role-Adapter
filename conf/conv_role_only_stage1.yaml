@@ -1,0 +1,53 @@
+defaults:
+  - conv_role_only_repair
+  - _self_
+
+name: conv_role_only_stage1
+group: role_stage1
+
+# Continue from the strongest screened role-only checkpoint. Load weights only
+# so this stage has an independent game counter, optimizer, and scheduler.
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/role_only_repair
+checkpoint_file: 05376.pt
+weights_only: true
+
+# Actor, Sidecar, and Gate remain frozen through role_only_training. Only the
+# 14 role_bias_layer scalars are admitted to the optimizer.
+role_bias_training_enabled: true
+role_only_training: true
+risk_gate_enabled: false
+use_aux_risk: false
+
+# Four-map sampling. 16x16 and 24x24 remain dominant because the repair target
+# is night survival; 12x12 stays a low policy-weight best-behavior anchor.
+env_configuration:
+  width: 16
+  height: 16
+  loglevel: 0
+  trainingMapSizes: [12, 16, 16, 24, 24, 24, 32]
+  trainingMapSampling: random
+
+role_small_map_policy_weight: 0.25
+role_hard_window_start: 25
+role_hard_window_weight: 2.0
+
+# Fixed best_agent teacher. The BC floor does not anneal away.
+use_teacher: true
+reference_policy_kl_cost: 0.01
+teacher_bc_cost_start: 0.05
+teacher_bc_cost_end: 0.05
+teacher_bc_anneal_games: 1
+
+optimizer_kwargs:
+  lr: 1.0e-05
+  eps: 0.0003
+
+batch_size: 16
+checkpoint_freq: 5000
+console_log_interval: 15.0
+total_games: 100
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/role_only_stage1
+
+hydra:
+  run:
+    dir: outputs/role_only_stage1/${now:%Y-%m-%d_%H-%M-%S}

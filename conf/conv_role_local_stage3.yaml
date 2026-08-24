@@ -1,0 +1,54 @@
+defaults:
+  - conv_role_only_stage1
+  - _self_
+
+name: conv_role_local_stage3
+group: role_local_stage3
+
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/role_only_repair
+checkpoint_file: 05376.pt
+weights_only: true
+
+# Sidecar/Gate source and checkpoint support remain in the repository, but the
+# model factory does not instantiate or execute either module in this mode.
+spatial_risk_sidecar_enabled: false
+risk_gate_enabled: false
+gate_only_training: false
+role_sidecar_training: false
+
+role_bias_training_enabled: true
+role_only_training: false
+role_local_adapter_enabled: true
+role_local_training: true
+role_local_hidden_channels: 16
+role_local_max_delta: 0.25
+
+role_assignment:
+  enabled: true
+  bias_enabled: true
+  learnable_biases: false
+  cooldown_turns: 5
+  firefighter_override_cooldown: true
+  preserve_build_city_logit: true
+  bias_scale_by_map_size: {12: 0.35, 16: 1.0, 24: 0.35, 32: 0.25}
+
+use_teacher: true
+reference_policy_kl_cost: 0.02
+teacher_bc_cost_start: 0.05
+teacher_bc_cost_end: 0.05
+teacher_bc_anneal_games: 1
+use_aux_risk: false
+
+optimizer_kwargs:
+  lr: 5.0e-07
+  eps: 0.0003
+
+batch_size: 16
+checkpoint_freq: 5000
+console_log_interval: 15.0
+total_games: 50
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/role_local_stage3
+
+hydra:
+  run:
+    dir: outputs/role_local_stage3/${now:%Y-%m-%d_%H-%M-%S}

@@ -20,6 +20,8 @@ from imitation_learning_utils import (
     load_agent_flags,
     teacher_actions_to_mask,
 )
+from lux_ai.rl_agent.role_assignment import RoleAssignmentConfig
+from lux_ai.rl_agent.trainable_role_bias import RoleBiasCodeBuilder, attach_role_bias_codes
 
 
 def parse_int_set(text: str) -> set[int]:
@@ -28,18 +30,64 @@ def parse_int_set(text: str) -> set[int]:
     return {int(part.strip()) for part in text.split(",") if part.strip()}
 
 
-def load_index(path: Path, max_rows: int = 0, map_sizes: set[int] | None = None) -> Dict[Path, List[dict]]:
+def stateful_updates(state: dict) -> List[str]:
+    updates = []
+    for team_text, team_state in state.get("teamStates", {}).items():
+        team = int(team_text)
+        updates.append(f"rp {team} {team_state.get('researchPoints', 0)}")
+        for unit_id, unit in team_state.get("units", {}).items():
+            cargo = unit.get("cargo", {})
+            updates.append(
+                f"u {unit.get('type', 0)} {team} {unit_id} {unit['x']} {unit['y']} "
+                f"{unit.get('cooldown', 0)} {cargo.get('wood', 0)} "
+                f"{cargo.get('coal', 0)} {cargo.get('uranium', 0)}"
+            )
+    for y, row in enumerate(state.get("map", [])):
+        for x, cell in enumerate(row):
+            resource = cell.get("resource")
+            if resource:
+                updates.append(f"r {resource['type']} {x} {y} {resource.get('amount', 0)}")
+            road = float(cell.get("road", 0) or 0)
+            if road:
+                updates.append(f"ccd {x} {y} {road}")
+    for city_id, city in state.get("cities", {}).items():
+        team = int(city["team"])
+        updates.append(f"c {team} {city_id} {city.get('fuel', 0)} {city.get('lightupkeep', 0)}")
+        for tile in city.get("cityCells", []):
+            updates.append(
+                f"ct {team} {city_id} {tile['x']} {tile['y']} {tile.get('cooldown', 0)}"
+            )
+    updates.append("D_DONE")
+    return updates
+
+
+def replay_updates(replay: dict, step: int) -> List[str]:
+    if replay.get("stateful"):
+        updates = stateful_updates(replay["stateful"][step])
+        if step == 0:
+            return ["0", f"{replay['width']} {replay['height']}", *updates]
+        return updates
+    return list(replay["steps"][step][0]["observation"].get("updates") or [])
+
+
+def load_index(path: Path, max_rows: int = 0, map_sizes: set[int] | None = None, wanted_split: str = "") -> Dict[Path, List[dict]]:
     grouped = defaultdict(list)
     with path.open(encoding="utf-8", newline="") as in_file:
         reader = csv.DictReader(in_file)
         for row in reader:
-            if map_sizes and int(row["width"]) not in map_sizes:
+            if wanted_split and row.get("split") != wanted_split:
                 continue
+            width = int(row.get("width") or row.get("map_size") or 0)
+            if map_sizes and width not in map_sizes:
+                continue
+            row["width"] = width
+            row["episode_id"] = row.get("episode_id") or row.get("replay_id") or row.get("fingerprint")
+            row["teacher_team"] = row.get("teacher_team") or row.get("teacher_identity") or "unknown"
             row["state_step"] = int(row["state_step"])
             row["action_step"] = int(row["action_step"])
             row["teacher_player"] = int(row["teacher_player"])
             row["weight"] = float(row["weight"])
-            grouped[Path(row["file"])].append(row)
+            grouped[Path(row.get("metric_file") or row["file"])].append(row)
             if max_rows and sum(len(v) for v in grouped.values()) >= max_rows:
                 break
     for rows in grouped.values():
@@ -57,6 +105,9 @@ def _append_sample(buffers: dict, env_output: dict, target: dict, meta: dict, we
     for key, value in env_output["info"]["available_actions_mask"].items():
         buffers["available_actions_mask"][key].append(value.squeeze(0).cpu())
     buffers["input_mask"].append(env_output["info"]["input_mask"].squeeze(0).cpu())
+    for key, value in env_output["info"].get("role_bias_codes", {}).items():
+        buffers["role_bias_codes"][key].append(value.squeeze(0).cpu())
+    buffers["role_bias_scale"].append(env_output["info"]["role_bias_scale"].squeeze(0).cpu())
     for key, value in target.items():
         buffers["actions_taken"][key].append(torch.from_numpy(value).cpu())
 
@@ -67,6 +118,8 @@ def _empty_buffers() -> dict:
         "available_actions_mask": defaultdict(list),
         "actions_taken": defaultdict(list),
         "input_mask": [],
+        "role_bias_codes": defaultdict(list),
+        "role_bias_scale": [],
         "weights": [],
         "critical_mask": [],
         "counterfactual_scale": [],
@@ -87,6 +140,8 @@ def _flush(buffers: dict, output_dir: Path, shard_index: int) -> int:
             key: torch.stack(values).to(torch.bool) for key, values in buffers["actions_taken"].items()
         },
         "input_mask": torch.stack(buffers["input_mask"]),
+        "role_bias_codes": {key: torch.stack(values) for key, values in buffers["role_bias_codes"].items()},
+        "role_bias_scale": torch.stack(buffers["role_bias_scale"]),
         "weights": torch.stack(buffers["weights"]),
         "critical_mask": torch.stack(buffers["critical_mask"]),
         "counterfactual_scale": torch.stack(buffers["counterfactual_scale"]),
@@ -117,6 +172,7 @@ def main() -> None:
     )
     parser.add_argument("--shard-size", type=int, default=4096)
     parser.add_argument("--max-rows", type=int, default=0)
+    parser.add_argument("--split", choices=["", "train", "validation", "calibration"], default="")
     parser.add_argument("--critical-min-scale-delta", type=float, default=0.02)
     parser.add_argument(
         "--map-sizes",
@@ -126,7 +182,8 @@ def main() -> None:
     args = parser.parse_args()
 
     flags = load_agent_flags(args.agent_dir)
-    grouped = load_index(args.index, args.max_rows, parse_int_set(args.map_sizes))
+    grouped = load_index(args.index, args.max_rows, parse_int_set(args.map_sizes), args.split)
+    role_config = RoleAssignmentConfig.from_mapping(getattr(flags, "role_assignment", {}))
     buffers = _empty_buffers()
     shard_index = 0
     total = 0
@@ -134,10 +191,11 @@ def main() -> None:
     for replay_path, rows in grouped.items():
         with replay_path.open(encoding="utf-8") as replay_file:
             replay = json.load(replay_file)
-        steps = replay.get("steps") or []
-        if not steps:
+        step_count = len(replay.get("stateful") or replay.get("steps") or [])
+        if not step_count:
             continue
-        env = build_manual_env(flags, list(steps[0][0]["observation"].get("updates") or []))
+        env = build_manual_env(flags, replay_updates(replay, 0))
+        role_builder = RoleBiasCodeBuilder(role_config)
         placeholder = action_placeholder(env)
         current_step = 0
 
@@ -147,10 +205,12 @@ def main() -> None:
                 advance_manual_env(
                     env,
                     current_step,
-                    list(steps[current_step][0]["observation"].get("updates") or []),
+                    replay_updates(replay, current_step),
                 )
-            env_output = env_output_for_current_state(env, placeholder)
-            actions = steps[row["action_step"]][row["teacher_player"]].get("action") or []
+            env_output = attach_role_bias_codes(env_output_for_current_state(env, placeholder), env, role_builder)
+            actions = json.loads(row.get("actions_json") or "[]")
+            if not actions and replay.get("steps"):
+                actions = replay["steps"][row["action_step"]][row["teacher_player"]].get("action") or []
             target = teacher_actions_to_mask(
                 env.unwrapped[0].game_state,
                 row["teacher_player"],

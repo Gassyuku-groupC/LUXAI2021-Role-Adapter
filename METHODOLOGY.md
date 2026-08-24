@@ -1,97 +1,61 @@
 # Methodology
 
-## Objective
+## Evidence Status
 
-The project aims to reproduce the strength of `best_agent` and then improve it without breaking legacy checkpoint compatibility. The adopted method separates strategic policy learning from spatial risk diagnosis:
+The current promoted local baseline is `role_05376 + Rot180`. It preserves the legacy Actor and applies the Role-City adapter after Actor inference. Rot180 is retained because matched ablation showed a large 16x16 benefit and a 24x24 benefit; normal model inference remained far below the Lux turn limit. Stage4 checkpoints were rejected after lower win rate, lower city margin, and lower BUILD_CITY frequency.
 
-- the Actor remains the primary policy;
-- a sidecar estimates tile-level future city-loss risk and safe expansion;
-- a narrow additive gate changes only selected policy logits;
-- low-learning-rate APPO updates are constrained by a frozen `best_agent` reference.
+Spatial Sidecar and Risk Gate are implemented research contributions, but remain disabled in the promoted agent. Documentation distinguishes architecture implemented in the repository from architecture enabled in evaluated deployment.
 
-## Replay Splitting And Calibration
+## Role-City Core Contribution
 
-Replay samples are grouped by source replay and seed before train, validation, and calibration splitting. Frames from one replay must never be distributed across splits because adjacent Lux states are highly correlated.
-
-Raw external replay data is the main independent calibration source. Newly generated deployed-agent replays represent the target policy distribution and are used for training and evaluation. Calibration is performed separately for 12, 16, 24, and 32 maps. The 32-map deployed set receives lower weight when it is small, with raw replay groups supplying broader coverage.
-
-For each map size, calibration reports:
-
-- replay/seed group count and frame count;
-- precision-recall curve and average precision;
-- the earliest threshold satisfying precision >= 0.85;
-- the configured deployment threshold.
-
-The current calibrated risk thresholds are:
-
-| Map | Risk threshold |
-| --- | ---: |
-| 12 | 0.9582753841 |
-| 16 | 0.9459641069 |
-| 24 | 0.9389875956 |
-| 32 | 0.8918934057 |
-
-## Spatial Risk Sidecar
-
-`SpatialRiskAttentionSidecar` is external to the legacy Actor state dictionary. It consumes `actor_features.detach()`, projects features to 64 channels, and forms full-resolution query tokens. Key/value tokens are generated with adaptive 8x8 pooling, followed by four-head cross-attention and spatial convolution. It outputs two `B x 2 x H x W` maps:
-
-- future city-loss risk;
-- safe-expansion probability.
-
-The detached input prevents gradients from the sidecar training objective from modifying the legacy backbone. The fixed 64-token key/value sequence avoids quadratic full-board self-attention on 32x32 maps.
-
-## Intervention Gate
-
-The gate produces an additive delta for selected actions, currently `worker/BUILD_CITY` and `city_tile/BUILD_WORKER`. The final operation is:
+`RoleCityAdapter.update(...)` classifies units and cities once per turn. `apply(...)` adds small role-conditioned deltas after Actor logits and before legal action selection:
 
 ```text
-final_logits = legal_mask(base_logits + gate_delta)
+final_logits = LegalMask(ActorLogits + RoleDelta)
 ```
 
-The final projection starts with zero weights and bias, giving exact Step-0 equivalence. The safe-expansion signal has whitelist priority. Dynamic activation rules are:
+The adapter is outside the legacy Actor checkpoint and can be disabled for exact rollback. Roles use five-turn cooldown state. Firefighter may override cooldown only for a critical city that is not an abandonment target. Transfer guidance only targets adjacent allied units. Attacker is lowest priority.
 
-- 12x12 and 16x16: disabled before turn 120; afterward active only when `turn % 40` is 25 through 29;
-- 24x24: disabled for player 0 before turn 80;
-- 32x32: active under its independently calibrated threshold.
+Expansion is a protected capability. `preserve_build_city_logit` disables fixed Attacker and Firefighter BUILD_CITY penalties. SacrificialDecay is limited to at most one single-tile city with zero fuel turns, sustained confirmation, no timely rescue, and sufficient distance from fuel resources.
 
-The spatial risk logits are detached at the gate boundary during APPO. This is intentional: APPO can learn how strongly to intervene without corrupting the independently calibrated risk estimator. Sidecar weights are updated during replay supervision/BC, then fixed during KL-APPO.
+## Spatial Risk Sidecar Contribution
 
-## Behavior Cloning
+`SpatialRiskAttentionSidecar` remains available for diagnostic research. It consumes `actor_features.detach()`, projects to 64 channels, uses full-resolution queries and adaptive 8x8 pooled key/value tokens, and emits tile-level risk and safe-expansion maps. Pooled-KV attention avoids quadratic 32x32 full self-attention while preserving global spatial context.
 
-The student starts from the historical first-place Actor checkpoint. Expert replay shards supervise policy actions and spatial-risk targets. Invalid expert targets are removed using the legal-action mask before cross-entropy. Training and validation are split by replay group rather than frame.
+Replay groups are split by seed/replay, never by frame. Calibration is independent for 12, 16, 24, and 32 maps and reports sample count, PR curve, average precision, and the first threshold satisfying precision at least 0.85.
 
-BC checkpoints contain the combined Actor, Sidecar, and Gate state. The number of epochs is selected by grouped validation convergence rather than fixed at five. Training stops or rolls back on non-finite loss, non-finite gradients, or worsening validation loss.
+## Intervention Gate Contribution
 
-## KL-APPO + V-trace
+The optional Gate produces an additive policy-logit delta. Its final projection is zero initialized, so Step 0 is mathematically equivalent to the base Actor. Safe expansion has whitelist priority, map/phase rules limit activation, and legal masking occurs after delta addition. Current competitive evidence does not justify enabling it in `role_05376`.
 
-The RL stage uses:
+## Critical-State Learning
 
-- PPO clipped surrogate policy loss;
-- V-trace importance correction for asynchronous rollouts;
-- TD-lambda critic targets;
-- a frozen `best_agent` teacher with `KL(pi_student || pi_ref)`;
-- terminal outcome weight 0.80 and logarithmic city/unit scale shaping;
-- optional PFSP opponent sampling from best, historical, baseline, and external agents.
+Lux has snowballing divergence: an early city, resource, or positioning action can create a large late-game city margin. Future training therefore avoids global full-frame BC and focuses on pivotal states.
 
-The default APPO learning rate is `1e-6` and the reference KL cost is `0.005`. Teacher BC is annealed from `0.10` to zero over 500 games. Mixed precision uses an initial gradient scale of 16 because the original `65536` scale overflowed the sum-reduced value loss.
+For paired trajectories record:
 
-## Promotion Criteria
+- `t_action`: first meaningful legal-action divergence;
+- `t_economy`: first persistent city/unit/economic divergence;
+- `t_city`: first city-margin threshold crossing.
 
-A successful training run is not automatically a promoted agent. Promotion requires paired fixed-seed evaluation on both sides and all four map sizes against `best_agent`, first, stage350, and stage400. Report at least:
+Training windows precede the earliest reliable divergence. Strict DPO pairs require the same observation, two legal actions, and outcome or branch-rollout evidence. B/G replay-only actions from different states are weak preference or focal-BC evidence, not strict DPO pairs.
 
-- win rate;
-- final city-tile and unit margins;
-- worst-night city loss;
-- BUILD_CITY frequency;
-- side-specific performance;
-- timeout or invalid replay count.
+No global BUILD_CITY penalty is permitted. Initial critical-state DPO excludes BUILD_CITY as a rejected action. Promotion monitors BUILD_CITY count explicitly.
 
-The 200-game smoke run validates finite optimization and checkpoint updates only. It does not yet establish parity with or superiority over `best_agent`.
+## Layered Optimization
 
-## Optional Role Adapter
+Trainable scope expands only when the previous scope cannot change critical decisions:
 
-The role and city adapter is an external, independently switchable policy
-post-processor. It preserves the legacy Actor checkpoint and applies only
-legal-action logit biases. The default configuration is disabled, which keeps
-the reproduced `best_agent` path unchanged. See [ROLE.md](ROLE.md) for role
-semantics, transfer constraints, learning stages, and current A/B evidence.
+1. Role biases and Role-conditioned Local Adapter.
+2. Final policy head.
+3. ResNet blocks 23-24.
+
+The remaining Actor stays frozen by default. State-adaptive Teacher KL is computed per state before reduction: normal and small-map states retain stronger `best_agent` anchoring; validated critical branching and fuel-emergency states receive weaker KL. Teacher constraints are drift protection, not an oracle assumption.
+
+Online PFSP may use only executable policies: best, first, stage350, stage400, and historical checkpoints. B/G replay-only policies remain offline evidence.
+
+## Reward And Promotion Boundaries
+
+Terminal outcome dominates learning. The absolute cumulative contribution of all shaping rewards is bounded relative to terminal win/loss. City and unit shaping use bounded potential differences; city-loss shaping cannot be farmed by repeatedly building and losing cities.
+
+Every candidate is evaluated on both sides with preregistered seeds. Development is used for screening, Promotion for full comparison, and Holdout only for final confirmation. Timeouts remain failures. Promotion requires matched completed-game evidence, preserved small-map strength, no material BUILD_CITY decline, controlled worst-night loss, and no timeout regression.

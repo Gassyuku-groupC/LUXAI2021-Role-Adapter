@@ -1,0 +1,21 @@
+schema_version: 1
+identity: role_05376+Rot180
+status: promoted_local_baseline
+package_source: outputs/checkpoint_selection/agents/role_05376
+locked_package: outputs/submission_packages/role_05376_rot180_locked
+runtime:
+  data_augmentations: [Rot180]
+  role_city_enabled: true
+  spatial_sidecar_enabled: false
+  intervention_gate_enabled: false
+hashes:
+  candidate_weights_sha256: 523d166361e18158ada242e3aa473b44323cb55f53ce152ca0dc7a948d887126
+  model_config_sha256: 4a9d44eb020aaf35855ba656e904ed4969d2faaabb18afcfd81a5d91dd8a4862
+  runtime_config_sha256: cfb1954cc64d8a17f553e9a20e83243f5b60ecd51e7f419e27deee9cc7694bab
+  role_yaml_sha256: a5e5b7b848b469634f930f4318d4f06c8a861df6da7235116c96a2ebc8bbf9c6
+source_code:
+  branch: actor-sidecar-kl-appo
+  commit: recorded_in_local_BASELINE_LOCK.json
+notes:
+  - The package itself is ignored by Git; reproduce the lock manifest with scripts/lock_role_baseline.py.
+  - Sidecar and intervention Gate code remain in the repository but are disabled for this baseline.

@@ -211,8 +211,9 @@ class RoleCityAdapter(nn.Module):
                 if direction is not None:
                     self._bias_worker_action(worker_logits, worker_mask, player_id, x, y, f"MOVE_{direction}",
                                              "attacker_block_move_bias")
-                self._bias_worker_action(worker_logits, worker_mask, player_id, x, y, "BUILD_CITY",
-                                         "attacker_build_city_penalty", sign=-1.0)
+                if not self.config.preserve_build_city_logit:
+                    self._bias_worker_action(worker_logits, worker_mask, player_id, x, y, "BUILD_CITY",
+                                             "attacker_build_city_penalty", sign=-1.0)
             elif assignment.role == FIREFIGHTER:
                 target = self._targets.get(("critical", worker.id))
                 direction = self._directions.get(("critical", worker.id))
@@ -220,8 +221,9 @@ class RoleCityAdapter(nn.Module):
                     self._bias_worker_action(worker_logits, worker_mask, player_id, x, y, f"MOVE_{direction}",
                                              "firefighter_move_bias")
                 self._bias_firefighter_transfers(worker_logits, worker_mask, player_id, worker, target)
-                self._bias_worker_action(worker_logits, worker_mask, player_id, x, y, "BUILD_CITY",
-                                         "firefighter_build_city_penalty", sign=-1.0)
+                if not self.config.preserve_build_city_logit:
+                    self._bias_worker_action(worker_logits, worker_mask, player_id, x, y, "BUILD_CITY",
+                                             "firefighter_build_city_penalty", sign=-1.0)
 
         research_complete = int(player.research_points) >= 200
         for pos, city_role in (() if safety_only else city_tile_roles(player, self.snapshot).items()):

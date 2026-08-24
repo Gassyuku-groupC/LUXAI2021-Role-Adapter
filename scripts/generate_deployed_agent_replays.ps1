@@ -12,8 +12,11 @@ param(
     [int[]]$Sides = @(0, 1),
     [string]$OutputDir = "outputs\spatial_risk_deployed_replays",
     [int]$AgentTurnTimeoutMs = 30000,
-    [int]$TimeoutSeconds = 420,
+    [int]$TimeoutSeconds = 240,
     [int]$HeartbeatSeconds = 60,
+    [int]$MaxAttempts = 1,
+    [int]$RetryDelaySeconds = 5,
+    [switch]$DisableEnginePipeFix,
     [switch]$DisableRoleTrace,
     [switch]$ContinueOnFailure
 )
@@ -35,6 +38,7 @@ $Node = (Resolve-Path -LiteralPath $NodeExe).Path
 $NodeRoot = Split-Path -Parent $Node
 $LuxCli = Join-Path $LuxRoot "node_modules\@lux-ai\2021-challenge\lib\es5\bin\index.js"
 $Converter = Join-Path $LuxRoot "scripts\convert_replay_stateful.js"
+$EnginePatch = Join-Path $LuxRoot "scripts\lux_sequential_state_send_patch.js"
 
 function Resolve-ProjectPath([string]$Path) {
     if ([IO.Path]::IsPathRooted($Path)) { return $Path }
@@ -54,6 +58,8 @@ $ReplayDir = Join-Path $OutputDir "replays"
 $LogDir = Join-Path $OutputDir "logs"
 $RoleDir = Join-Path $OutputDir "roles"
 New-Item -ItemType Directory -Path $ReplayDir, $LogDir, $RoleDir -Force | Out-Null
+$AttemptDiagnostics = Join-Path $OutputDir "attempt_diagnostics.jsonl"
+$EngineLogRoot = Join-Path $LuxRoot "errorlogs"
 
 $CurrentPath = [Environment]::GetEnvironmentVariable("Path", "Process")
 [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
@@ -84,7 +90,9 @@ foreach ($side in $Sides) {
     if ($side -notin @(0, 1)) { throw "Invalid side $side; expected 0 or 1." }
 }
 
-foreach ($required in @($Python, $Node, $LuxCli, $Converter, (Join-Path $CurrentAgent "main.py"))) {
+$requiredPaths = @($Python, $Node, $LuxCli, $Converter, (Join-Path $CurrentAgent "main.py"))
+if (-not $DisableEnginePipeFix) { $requiredPaths += $EnginePatch }
+foreach ($required in $requiredPaths) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required path not found: $required" }
 }
 foreach ($opponent in $Opponents) {
@@ -148,26 +156,96 @@ function Test-AgentTimeout([string]$StdoutPath, [string]$StderrPath) {
     return $false
 }
 
+function Get-LastAgentTurn([datetime]$Started) {
+    $lastTurn = -1
+    $latestMatch = Get-ChildItem (Join-Path $LuxRoot "errorlogs") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.CreationTime -ge $Started.AddSeconds(-2) } |
+        Sort-Object CreationTime -Descending |
+        Select-Object -First 1
+    if ($latestMatch) {
+        foreach ($log in Get-ChildItem $latestMatch.FullName -Filter "agent_*.log" -ErrorAction SilentlyContinue) {
+            $matches = Select-String -LiteralPath $log.FullName -Pattern "Turn:\s*(\d+)" -AllMatches -ErrorAction SilentlyContinue
+            foreach ($line in $matches) {
+                foreach ($match in $line.Matches) {
+                    $lastTurn = [Math]::Max($lastTurn, [int]$match.Groups[1].Value)
+                }
+            }
+        }
+    }
+    return $lastTurn
+}
+
+function Write-AttemptDiagnostic(
+    [string]$Name, [int]$Attempt, [datetime]$Started, [string]$Status,
+    [int]$ProcessId, [Nullable[int]]$ExitCode, [string]$CommandReplay,
+    [string]$StdoutPath, [string]$StderrPath, [string]$ErrorText
+) {
+    $record = [ordered]@{
+        timestamp_utc = [DateTime]::UtcNow.ToString("o")
+        name = $Name
+        attempt = $Attempt
+        status = $Status
+        elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $Started).TotalSeconds, 3)
+        process_id = $ProcessId
+        exit_code = $ExitCode
+        command_bytes = if (Test-Path -LiteralPath $CommandReplay) { (Get-Item -LiteralPath $CommandReplay).Length } else { 0 }
+        stdout_bytes = if (Test-Path -LiteralPath $StdoutPath) { (Get-Item -LiteralPath $StdoutPath).Length } else { 0 }
+        stderr_bytes = if (Test-Path -LiteralPath $StderrPath) { (Get-Item -LiteralPath $StderrPath).Length } else { 0 }
+        last_agent_turn = Get-LastAgentTurn $Started
+        error = $ErrorText
+    }
+    Add-Content -LiteralPath $AttemptDiagnostics -Value ($record | ConvertTo-Json -Compress)
+}
+
 function Invoke-Match(
     [string]$Player0,
     [string]$Player1,
     [int]$Seed,
     [int]$MapSize,
-    [string]$Name
+    [string]$Name,
+    [int]$Attempt = 1
 ) {
     $commandReplay = Join-Path $ReplayDir "$Name.commands.json"
     $statefulReplay = Join-Path $ReplayDir "$Name.json"
-    $stdout = Join-Path $LogDir "$Name.stdout.log"
-    $stderr = Join-Path $LogDir "$Name.stderr.log"
-    $traceBase = Join-Path $RoleDir $Name
-    $arguments = @(
+    $stdout = Join-Path $LogDir "$Name.attempt$Attempt.stdout.log"
+    $stderr = Join-Path $LogDir "$Name.attempt$Attempt.stderr.log"
+    $traceBase = Join-Path $RoleDir "$Name.attempt$Attempt"
+    $currentSide = if ($Player0 -eq (Join-Path $CurrentAgent "main.py")) { 0 } else { 1 }
+    $engineLogsBefore = @{}
+    if (Test-Path -LiteralPath $EngineLogRoot) {
+        Get-ChildItem -LiteralPath $EngineLogRoot -Directory | ForEach-Object {
+            $engineLogsBefore[$_.FullName] = $true
+        }
+    }
+    function Copy-MatchAgentLogs([int]$CurrentSide) {
+        if (-not (Test-Path -LiteralPath $EngineLogRoot)) { return }
+        $newLogDir = Get-ChildItem -LiteralPath $EngineLogRoot -Directory |
+            Where-Object { -not $engineLogsBefore.ContainsKey($_.FullName) } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($null -eq $newLogDir) { return }
+        $currentLog = Join-Path $newLogDir.FullName "agent_$CurrentSide.log"
+        $opponentLog = Join-Path $newLogDir.FullName "agent_$((1 - $CurrentSide)).log"
+        if (Test-Path -LiteralPath $currentLog) {
+            Copy-Item -LiteralPath $currentLog -Destination (Join-Path $LogDir "$Name.attempt$Attempt.agent_current.log") -Force
+        }
+        if (Test-Path -LiteralPath $opponentLog) {
+            Copy-Item -LiteralPath $opponentLog -Destination (Join-Path $LogDir "$Name.attempt$Attempt.agent_opponent.log") -Force
+        }
+    }
+    $arguments = @()
+    if (-not $DisableEnginePipeFix) {
+        $arguments += @("-r", "`"$EnginePatch`"")
+    }
+    $arguments += @(
         "`"$LuxCli`"", "`"$Player0`"", "`"$Player1`"", "--python", "`"$Python`"",
         "--seed", $Seed, "--loglevel", "1", "--memory", "8000",
         "--maxtime", $AgentTurnTimeoutMs, "--width", $MapSize, "--height", $MapSize,
         "--storeLogs=true", "--statefulReplay=false", "--out", "`"$commandReplay`""
     )
     if (-not (Test-JsonReplay $commandReplay)) {
-        Write-Host "Running $Name"
+        Remove-Item -LiteralPath $commandReplay -Force -ErrorAction SilentlyContinue
+        Write-Host "Running $Name attempt=$Attempt/$MaxAttempts"
         if (-not $DisableRoleTrace) {
             Remove-Item -LiteralPath "$traceBase.p0.jsonl", "$traceBase.p1.jsonl" -Force -ErrorAction SilentlyContinue
             [Environment]::SetEnvironmentVariable("LUX_ROLE_TRACE_PATH", $traceBase, "Process")
@@ -181,7 +259,10 @@ function Invoke-Match(
         while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Seconds 2
             if (Test-AgentTimeout $stdout $stderr) {
+                $agentExitCode = if ($process.HasExited) { [Nullable[int]]$process.ExitCode } else { $null }
+                Write-AttemptDiagnostic $Name $Attempt $started "agent_turn_timeout" $process.Id $agentExitCode $commandReplay $stdout $stderr "Lux engine reported an agent turn timeout"
                 Stop-MatchProcesses $process.Id
+                Copy-MatchAgentLogs $currentSide
                 throw "Agent turn timeout was reported by the Lux engine: $Name"
             }
             if (Test-JsonReplay $commandReplay) { break }
@@ -194,10 +275,16 @@ function Invoke-Match(
                 $nextHeartbeat = [DateTime]::UtcNow.AddSeconds($HeartbeatSeconds)
             }
         }
+        $exitCode = if ($process.HasExited) { [Nullable[int]]$process.ExitCode } else { $null }
         if (Test-JsonReplay $commandReplay) {
+            Write-AttemptDiagnostic $Name $Attempt $started "completed" $process.Id $exitCode $commandReplay $stdout $stderr ""
             Stop-MatchProcesses $process.Id
+            Copy-MatchAgentLogs $currentSide
         } else {
+            $failureStatus = if ($process.HasExited) { "process_exit_no_replay" } else { "outer_timeout" }
             Stop-MatchProcesses $process.Id
+            Copy-MatchAgentLogs $currentSide
+            Write-AttemptDiagnostic $Name $Attempt $started $failureStatus $process.Id $exitCode $commandReplay $stdout $stderr "Replay did not produce valid JSON"
             throw "Replay did not produce valid JSON within $TimeoutSeconds seconds: $Name"
         }
     } else {
@@ -245,9 +332,25 @@ foreach ($mapSize in $MapSizes) {
                 $p0 = if ($side -eq 0) { Join-Path $CurrentAgent "main.py" } else { Join-Path $opponent.Path "main.py" }
                 $p1 = if ($side -eq 0) { Join-Path $opponent.Path "main.py" } else { Join-Path $CurrentAgent "main.py" }
                 try {
-                    $result = Invoke-Match $p0 $p1 $seed $mapSize $name
+                    $result = $null
+                    $attemptErrors = @()
+                    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+                        try {
+                            $result = Invoke-Match $p0 $p1 $seed $mapSize $name $attempt
+                            break
+                        } catch {
+                            $attemptErrors += $_.Exception.Message
+                            if ($attempt -lt $MaxAttempts) {
+                                Write-Warning "Attempt $attempt/$MaxAttempts failed for $name; retrying after $RetryDelaySeconds second(s)."
+                                Start-Sleep -Seconds $RetryDelaySeconds
+                            }
+                        }
+                    }
+                    if ($null -eq $result) {
+                        throw ($attemptErrors -join " | ")
+                    }
                     if (-not $DisableRoleTrace) {
-                        $trace = Join-Path $RoleDir "$name.p$side.jsonl"
+                        $trace = Join-Path $RoleDir "$name.attempt$attempt.p$side.jsonl"
                         $roleSidecar = Join-Path $ReplayDir "$name.roles.json"
                         if (Test-Path -LiteralPath $trace) {
                             & $Python (Join-Path $PSScriptRoot "finalize_role_trace.py") `

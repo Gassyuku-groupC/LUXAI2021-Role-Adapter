@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -83,8 +83,15 @@ class RoleAssignmentConfig:
     cooldown_turns: int = 5
     firefighter_override_cooldown: bool = True
     critical_city_nights: float = 2.0
-    abandon_city_nights: float = 1.0
-    abandon_transport_share_threshold: float = 0.50
+    abandon_city_nights: float = 0.25
+    abandon_transport_share_threshold: float = 0.75
+    abandon_min_turn: int = 30
+    abandon_confirmation_turns: int = 3
+    abandon_max_cities: int = 1
+    abandon_max_fraction: float = 0.10
+    abandon_min_city_count: int = 3
+    abandon_min_fuel_distance: int = 6
+    abandon_rescue_distance: int = 6
     builder_cargo_fill_ratio: float = 0.95
     attacker_enemy_worker_distance: int = 2
     max_log_units: int = 8
@@ -96,6 +103,7 @@ class RoleAssignmentConfig:
     max_biased_workers_by_map_size: Mapping[int, int] = field(default_factory=dict)
     safety_only_map_sizes: Sequence[int] = field(default_factory=tuple)
     update_time_budget_seconds: float = 1.5
+    preserve_build_city_logit: bool = False
     bias_params: RoleCityBiasParams = field(default_factory=RoleCityBiasParams)
 
     @classmethod
@@ -183,6 +191,7 @@ class RoleState:
     unit_ids: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=object))
     role_codes: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int8))
     cooldown_expiry: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int16))
+    city_abandon_streaks: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -233,7 +242,11 @@ def assign_roles(
 ) -> RoleAssignmentSnapshot:
     risk_blocked_positions = set(risk_blocked_positions or ())
     city_roles = classify_city_specializations(
-        game_state, player, config, fuel_positions=fuel_positions
+        game_state,
+        player,
+        config,
+        fuel_positions=fuel_positions,
+        abandon_streaks=state.city_abandon_streaks,
     )
     abandoned = tuple(
         city_id for city_id, role in city_roles.items()
@@ -381,6 +394,7 @@ def classify_city_specializations(
         player,
         config: RoleAssignmentConfig,
         fuel_positions: Optional[Sequence[Position]] = None,
+        abandon_streaks: Optional[MutableMapping[str, int]] = None,
 ) -> Dict[str, CitySpecialization]:
     if fuel_positions is None:
         fuel_positions = _fuel_resource_positions(game_state, player)
@@ -414,12 +428,14 @@ def classify_city_specializations(
             for index, city_id in enumerate(city_ids_with_centers)
         }
     raw: Dict[str, CitySpecialization] = {}
+    candidates = []
     for city_id, city in player.cities.items():
         center = city_centers.get(city_id)
         fuel_distance = fuel_distance_by_city.get(city_id)
         city_distance = city_distance_by_city.get(city_id)
         nights = _city_nights_of_fuel(city)
-        abandon = _should_abandon_city(
+        candidate = _should_abandon_city(
+            game_state=game_state,
             city=city,
             center=center,
             player=player,
@@ -427,14 +443,52 @@ def classify_city_specializations(
             nights=nights,
             config=config,
         )
+        if abandon_streaks is not None:
+            abandon_streaks[city_id] = abandon_streaks.get(city_id, 0) + 1 if candidate else 0
+            confirmed = abandon_streaks[city_id] >= max(config.abandon_confirmation_turns, 1)
+        else:
+            confirmed = candidate and config.abandon_confirmation_turns <= 1
+        if confirmed:
+            candidates.append(city_id)
         raw[city_id] = CitySpecialization(
             city_id=city_id,
-            role=SACRIFICIAL_DECAY if abandon else RESEARCH_STATION,
+            role=RESEARCH_STATION,
             nights_of_fuel=nights,
             fuel_distance=fuel_distance,
             city_distance=city_distance,
-            abandon=abandon,
-            reason="abandon_low_fuel_high_transport" if abandon else "default_research",
+            abandon=False,
+            reason="abandon_candidate_confirming" if candidate else "default_research",
+        )
+
+    if abandon_streaks is not None:
+        active_ids = set(player.cities)
+        for stale_id in list(abandon_streaks):
+            if stale_id not in active_ids:
+                del abandon_streaks[stale_id]
+
+    city_count = len(raw)
+    allowed_by_fraction = max(int(np.ceil(city_count * max(config.abandon_max_fraction, 0.0))), 0)
+    abandon_limit = min(
+        max(config.abandon_max_cities, 0),
+        allowed_by_fraction,
+        max(city_count - 1, 0),
+    )
+    if city_count < config.abandon_min_city_count:
+        abandon_limit = 0
+    selected = sorted(
+        candidates,
+        key=lambda city_id: (
+            raw[city_id].nights_of_fuel,
+            -(raw[city_id].fuel_distance or 10**6),
+            city_id,
+        ),
+    )[:abandon_limit]
+    for city_id in selected:
+        raw[city_id] = _replace_city_role(
+            raw[city_id],
+            SACRIFICIAL_DECAY,
+            "abandon_confirmed_strict_budget",
+            abandon=True,
         )
 
     active_city_ids = [city_id for city_id, spec in raw.items() if not spec.abandon]
@@ -459,8 +513,13 @@ def classify_city_specializations(
     }
 
 
-def _replace_city_role(spec: CitySpecialization, role: str, reason: str) -> CitySpecialization:
-    if spec.abandon:
+def _replace_city_role(
+        spec: CitySpecialization,
+        role: str,
+        reason: str,
+        abandon: Optional[bool] = None,
+) -> CitySpecialization:
+    if spec.abandon and abandon is None:
         return spec
     return CitySpecialization(
         city_id=spec.city_id,
@@ -468,7 +527,7 @@ def _replace_city_role(spec: CitySpecialization, role: str, reason: str) -> City
         nights_of_fuel=spec.nights_of_fuel,
         fuel_distance=spec.fuel_distance,
         city_distance=spec.city_distance,
-        abandon=spec.abandon,
+        abandon=spec.abandon if abandon is None else abandon,
         reason=reason,
     )
 
@@ -604,15 +663,31 @@ def _normalize_distance(value: Optional[float], min_value: float, max_value: flo
     return (value - min_value) / spread
 
 
-def _should_abandon_city(*, city, center, player, fuel_distance, nights: float, config: RoleAssignmentConfig) -> bool:
+def _should_abandon_city(
+        *, game_state, city, center, player, fuel_distance, nights: float,
+        config: RoleAssignmentConfig,
+) -> bool:
+    turn = int(game_state.turn)
+    if turn < config.abandon_min_turn or turn % 40 < 30:
+        return False
     if nights > config.abandon_city_nights:
+        return False
+    fuel_poor = fuel_distance is None or fuel_distance > max(
+        config.abandon_min_fuel_distance,
+        len(city.citytiles) + 3,
+    )
+    if not fuel_poor:
         return False
     cargo_carriers = [unit for unit in player.units if _cargo_total(unit) > 0]
     if not cargo_carriers:
         return True
+    if center is not None and any(
+            unit.pos.distance_to(center) <= config.abandon_rescue_distance
+            for unit in cargo_carriers
+    ):
+        return False
     needed = min(len(cargo_carriers), max(len(city.citytiles), 1))
     transport_share = needed / max(len(player.units), 1)
-    fuel_poor = fuel_distance is None or fuel_distance > max(4, len(city.citytiles) + 3)
     return transport_share > config.abandon_transport_share_threshold and fuel_poor
 
 

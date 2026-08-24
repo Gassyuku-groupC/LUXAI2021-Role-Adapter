@@ -60,7 +60,30 @@ TRAINING_AUGMENTERS = (HorizontalFlip, VerticalFlip, Rot90, Rot180, Rot270)
 
 def load_training_model_state(model: nn.Module, state_dict: Dict, flags: SimpleNamespace) -> None:
     """Load a legacy actor checkpoint while allowing a newly added gate head."""
-    if getattr(flags, "spatial_risk_sidecar_enabled", False):
+    if getattr(flags, "role_local_adapter_enabled", False):
+        if any(key.startswith("role_local_adapter.") for key in state_dict):
+            model.load_state_dict(state_dict, strict=True)
+            return
+        if any(key.startswith("base_agent.") for key in state_dict):
+            retained = {
+                key: value for key, value in state_dict.items()
+                if key.startswith("base_agent.") or key.startswith("role_bias_layer.")
+            }
+            incompatible = model.load_state_dict(retained, strict=False)
+            invalid_missing = [
+                key for key in incompatible.missing_keys
+                if not key.startswith("role_local_adapter.")
+            ]
+            if invalid_missing or incompatible.unexpected_keys:
+                raise RuntimeError(
+                    f"Incompatible role-local checkpoint: missing={invalid_missing}, "
+                    f"unexpected={list(incompatible.unexpected_keys)}"
+                )
+            logging.info("Ignored legacy Sidecar/Gate tensors and initialized zero local Role adapter.")
+            return
+        model.base_agent.load_state_dict(state_dict, strict=True)
+        logging.info("Initialized Role-local adapter on an unchanged legacy actor.")
+    elif getattr(flags, "spatial_risk_sidecar_enabled", False):
         if any(key.startswith("base_agent.") for key in state_dict):
             incompatible = model.load_state_dict(state_dict, strict=False)
             allowed_missing = (
@@ -130,6 +153,74 @@ def configure_role_only_training(model: nn.Module, training: bool) -> None:
         parameter.requires_grad_(True)
     model.eval()
     role_layer.train(training)
+
+
+def configure_role_sidecar_training(model: nn.Module, training: bool) -> None:
+    required = ("spatial_risk_sidecar", "intervention_gate", "role_bias_layer")
+    missing = [name for name in required if getattr(model, name, None) is None]
+    if missing:
+        raise ValueError(
+            "role_sidecar_training requires sidecar, gate, and role bias modules; "
+            f"missing={missing}"
+        )
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for name in required:
+        module = getattr(model, name)
+        for parameter in module.parameters():
+            parameter.requires_grad_(True)
+    model.eval()
+    for name in required:
+        getattr(model, name).train(training)
+
+
+def configure_role_local_training(model: nn.Module, training: bool) -> None:
+    local_adapter = getattr(model, "role_local_adapter", None)
+    if local_adapter is None:
+        raise ValueError("role_local_training requires role_local_adapter_enabled=true.")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for parameter in local_adapter.parameters():
+        parameter.requires_grad_(True)
+    model.eval()
+    local_adapter.train(training)
+
+
+def configure_role_local_bias_training(model: nn.Module, training: bool) -> None:
+    """Train local role deltas and compact role biases with the Actor frozen."""
+    required = ("role_local_adapter", "role_bias_layer")
+    missing = [name for name in required if getattr(model, name, None) is None]
+    if missing:
+        raise ValueError(f"role_local_bias_training missing modules: {missing}")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for module in (model.role_local_adapter, model.role_bias_layer):
+        for parameter in module.parameters():
+            parameter.requires_grad_(True)
+    model.eval()
+    model.role_local_adapter.train(training)
+    model.role_bias_layer.train(training)
+
+
+def configure_role_joint_head_training(model: nn.Module, training: bool) -> None:
+    """Train policy/value heads and role adapters while freezing the backbone."""
+    required = ("base_agent", "role_bias_layer", "role_local_adapter")
+    missing = [name for name in required if getattr(model, name, None) is None]
+    if missing:
+        raise ValueError(f"role_joint_head_training missing modules: {missing}")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    head_modules = (
+        model.base_agent.actor_base,
+        model.base_agent.actor,
+        model.base_agent.baseline_base,
+        model.base_agent.baseline,
+    )
+    for module in (*head_modules, model.role_bias_layer, model.role_local_adapter):
+        for parameter in module.parameters():
+            parameter.requires_grad_(True)
+    model.set_policy_head_training(True)
+    model.train(training)
 
 
 def create_role_code_builder(flags) -> Optional[RoleBiasCodeBuilder]:
@@ -468,12 +559,25 @@ def compute_appo_policy_loss(
         advantages: torch.Tensor,
         clip_ratio: float,
         reduction: str,
+        valid_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """PPO clipped surrogate over asynchronous behavior-policy rollouts."""
+    if valid_mask is None:
+        valid_mask = torch.isfinite(target_action_log_probs) & torch.isfinite(
+            behavior_action_log_probs
+        )
+    else:
+        valid_mask = valid_mask & torch.isfinite(target_action_log_probs) & torch.isfinite(
+            behavior_action_log_probs
+        )
+    if not valid_mask.any():
+        zero = target_action_log_probs[valid_mask].sum() * 0.0
+        return zero, zero.detach(), zero.detach()
     log_ratio = (target_action_log_probs - behavior_action_log_probs).clamp(-20.0, 20.0)
+    log_ratio = log_ratio[valid_mask]
     ratio = log_ratio.exp()
     clipped_ratio = ratio.clamp(1.0 - float(clip_ratio), 1.0 + float(clip_ratio))
-    detached_advantages = advantages.detach()
+    detached_advantages = advantages.detach()[valid_mask]
     surrogate = torch.minimum(ratio * detached_advantages, clipped_ratio * detached_advantages)
     clip_fraction = (ratio != clipped_ratio).float().mean()
     approximate_kl = ((ratio - 1.0) - log_ratio).mean()
@@ -497,7 +601,10 @@ def stabilize_policy_advantages(
 
 
 def role_repair_advantage_weights(batch, advantages: torch.Tensor, flags) -> torch.Tensor:
-    if not getattr(flags, "role_only_training", False):
+    if not (
+            getattr(flags, "role_only_training", False)
+            or getattr(flags, "role_local_bias_training", False)
+    ):
         return torch.ones_like(advantages)
     board_size = batch["obs"]["board_size"].reshape(*advantages.shape[:2], -1)[..., 0]
     cycle = batch["obs"]["day_night_cycle"].reshape(*advantages.shape[:2], -1)[..., 0]
@@ -538,6 +645,7 @@ def act(
         env_output = add_role_codes_if_enabled(env.reset(force=True), env, role_code_builder)
         agent_output = actor_model(env_output)
         agent_output = apply_runtime_gate_to_actor_output(agent_output, env, flags)
+        agent_output.pop("role_local_deltas", None)
         while True:
             index = free_queue.get()
             if index is None:
@@ -552,6 +660,7 @@ def act(
 
                 agent_output = actor_model(env_output)
                 agent_output = apply_runtime_gate_to_actor_output(agent_output, env, flags)
+                agent_output.pop("role_local_deltas", None)
                 timings.time("model")
 
                 env_output = env.step(agent_output["actions"])
@@ -787,6 +896,28 @@ def learn(
 
             discounts = (~batch["done"]).float() * flags.discounting
             discounts = discounts.unsqueeze(-1).expand_as(combined_behavior_action_log_probs)
+            action_policy_samples = effective_action_counts > 0
+            finite_policy_samples = (
+                torch.isfinite(combined_behavior_action_log_probs)
+                & torch.isfinite(combined_learner_action_log_probs)
+            )
+            valid_policy_samples = finite_policy_samples & action_policy_samples
+            appo_invalid_sample_fraction = (
+                (action_policy_samples & ~finite_policy_samples).sum().float()
+                / action_policy_samples.sum().clamp(min=1)
+            )
+            # Stale legality can make a selected action impossible under one policy.
+            # Use a neutral V-trace ratio and omit that sample from PPO statistics.
+            combined_behavior_action_log_probs = torch.where(
+                valid_policy_samples,
+                combined_behavior_action_log_probs,
+                torch.zeros_like(combined_behavior_action_log_probs),
+            )
+            combined_learner_action_log_probs = torch.where(
+                valid_policy_samples,
+                combined_learner_action_log_probs,
+                torch.zeros_like(combined_learner_action_log_probs),
+            )
             values = learner_outputs["baseline"]
             vtrace_returns = vtrace.from_action_log_probs(
                 behavior_action_log_probs=combined_behavior_action_log_probs,
@@ -845,6 +976,7 @@ def learn(
                     appo_advantages,
                     flags.ppo_clip_ratio,
                     flags.reduction,
+                    valid_mask=valid_policy_samples,
                 )
             elif flags.algo == "impala":
                 vtrace_pg_loss = compute_policy_gradient_loss(
@@ -935,9 +1067,9 @@ def learn(
                 + gate_intervention_loss
             )
 
-            last_lr = lr_scheduler.get_last_lr()
-            assert len(last_lr) == 1, 'Logging per-parameter LR still needs support'
-            last_lr = last_lr[0]
+            learning_rates = lr_scheduler.get_last_lr()
+            last_lr = learning_rates[0]
+            role_bias_lr = learning_rates[-1]
             action_distributions_flat = {
                 key[16:]: val[batch["done"]][~val[batch["done"]].isnan()].sum().item()
                 for key, val in batch["info"].items()
@@ -983,6 +1115,7 @@ def learn(
                     "vtrace_pg_loss": vtrace_pg_loss.detach().item(),
                     "appo_clip_fraction": appo_clip_fraction.detach().item(),
                     "appo_approx_kl": appo_approx_kl.detach().item(),
+                    "appo_invalid_sample_fraction": appo_invalid_sample_fraction.detach().item(),
                     "upgo_pg_loss": upgo_pg_loss.detach().item(),
                     "baseline_loss": baseline_loss.detach().item(),
                     "teacher_kl_loss": teacher_kl_loss.detach().item(),
@@ -1012,6 +1145,7 @@ def learn(
                 ),
                 "Misc": {
                     "learning_rate": last_lr,
+                    "role_bias_learning_rate": role_bias_lr,
                     "teacher_bc_cost": teacher_bc_cost,
                     "vtrace_advantage_abs_max": vtrace_policy_advantages.abs().max().item(),
                     "upgo_advantage_abs_max": upgo_policy_advantages.abs().max().item(),
@@ -1118,6 +1252,14 @@ def train(flags):
     load_student_pretrain(actor_model, getattr(flags, "student_pretrain_checkpoint", None))
     if getattr(flags, "gate_only_training", False):
         configure_gate_only_training(actor_model, training=False)
+    elif getattr(flags, "role_joint_head_training", False):
+        configure_role_joint_head_training(actor_model, training=False)
+    elif getattr(flags, "role_local_bias_training", False):
+        configure_role_local_bias_training(actor_model, training=False)
+    elif getattr(flags, "role_local_training", False):
+        configure_role_local_training(actor_model, training=False)
+    elif getattr(flags, "role_sidecar_training", False):
+        configure_role_sidecar_training(actor_model, training=False)
     elif getattr(flags, "role_only_training", False):
         configure_role_only_training(actor_model, training=False)
     actor_model.eval()
@@ -1154,6 +1296,14 @@ def train(flags):
     load_student_pretrain(learner_model, getattr(flags, "student_pretrain_checkpoint", None))
     if getattr(flags, "gate_only_training", False):
         configure_gate_only_training(learner_model, training=True)
+    elif getattr(flags, "role_joint_head_training", False):
+        configure_role_joint_head_training(learner_model, training=True)
+    elif getattr(flags, "role_local_bias_training", False):
+        configure_role_local_bias_training(learner_model, training=True)
+    elif getattr(flags, "role_local_training", False):
+        configure_role_local_training(learner_model, training=True)
+    elif getattr(flags, "role_sidecar_training", False):
+        configure_role_sidecar_training(learner_model, training=True)
     elif getattr(flags, "role_only_training", False):
         configure_role_only_training(learner_model, training=True)
     else:
@@ -1178,13 +1328,79 @@ def train(flags):
     if not flags.disable_wandb:
         wandb.watch(learner_model, flags.model_log_freq, log="all", log_graph=True)
 
-    optimizer_params = [p for p in learner_model.parameters() if p.requires_grad]
-    if aux_risk_head is not None:
-        optimizer_params += list(aux_risk_head.parameters())
-    optimizer = flags.optimizer_class(
-        optimizer_params,
-        **flags.optimizer_kwargs
-    )
+    if getattr(flags, "role_joint_head_training", False):
+        policy_params = [
+            parameter
+            for module in (
+                learner_model.base_agent.actor_base,
+                learner_model.base_agent.actor,
+                learner_model.base_agent.baseline_base,
+                learner_model.base_agent.baseline,
+            )
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        local_params = [
+            parameter for parameter in learner_model.role_local_adapter.parameters()
+            if parameter.requires_grad
+        ]
+        role_params = [
+            parameter for parameter in learner_model.role_bias_layer.parameters()
+            if parameter.requires_grad
+        ]
+        optimizer_params = policy_params + local_params + role_params
+        optimizer_groups = [
+            {"params": policy_params, "lr": float(flags.policy_head_learning_rate)},
+            {"params": local_params, "lr": float(flags.role_local_learning_rate)},
+            {"params": role_params, "lr": float(flags.role_bias_learning_rate)},
+        ]
+        optimizer_kwargs = dict(flags.optimizer_kwargs)
+        optimizer_kwargs.pop("lr", None)
+        optimizer = flags.optimizer_class(optimizer_groups, **optimizer_kwargs)
+    elif getattr(flags, "role_local_bias_training", False):
+        local_params = [
+            parameter for parameter in learner_model.role_local_adapter.parameters()
+            if parameter.requires_grad
+        ]
+        role_params = [
+            parameter for parameter in learner_model.role_bias_layer.parameters()
+            if parameter.requires_grad
+        ]
+        optimizer_params = local_params + role_params
+        optimizer_groups = [
+            {"params": local_params, "lr": float(flags.role_local_learning_rate)},
+            {"params": role_params, "lr": float(flags.role_bias_learning_rate)},
+        ]
+        optimizer_kwargs = dict(flags.optimizer_kwargs)
+        optimizer_kwargs.pop("lr", None)
+        optimizer = flags.optimizer_class(optimizer_groups, **optimizer_kwargs)
+    elif getattr(flags, "role_sidecar_training", False):
+        sidecar_params = [
+            parameter
+            for module in (learner_model.spatial_risk_sidecar, learner_model.intervention_gate)
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        role_params = [
+            parameter for parameter in learner_model.role_bias_layer.parameters()
+            if parameter.requires_grad
+        ]
+        optimizer_params = sidecar_params + role_params
+        optimizer_groups = [
+            {"params": sidecar_params, "lr": float(flags.sidecar_learning_rate)},
+            {"params": role_params, "lr": float(flags.role_bias_learning_rate)},
+        ]
+        optimizer_kwargs = dict(flags.optimizer_kwargs)
+        optimizer_kwargs.pop("lr", None)
+        optimizer = flags.optimizer_class(optimizer_groups, **optimizer_kwargs)
+    else:
+        optimizer_params = [p for p in learner_model.parameters() if p.requires_grad]
+        if aux_risk_head is not None:
+            optimizer_params += list(aux_risk_head.parameters())
+        optimizer = flags.optimizer_class(
+            optimizer_params,
+            **flags.optimizer_kwargs
+        )
     if not optimizer_params:
         raise ValueError("No trainable parameters were selected for the optimizer.")
     if checkpoint_state is not None and not flags.weights_only:
@@ -1411,7 +1627,7 @@ def train(flags):
                 logging.info(
                     "Games %d/%s | steps %d | %.1f SPS | loss %s | reward %s | "
                     "bc %.3f W%.0f/C%.0f/K%.0f @ %.3f | aux %.3f P%.2f/R%.2f/+%.2f | "
-                    "city tiles %s | research %s | role B%.3f/F%.3f/T%.3f",
+                    "APPO invalid %.3f | city tiles %s | research %s | role B%.3f/F%.3f/T%.3f",
                     total_games_played,
                     flags.total_games if flags.total_games is not None else "--",
                     step,
@@ -1427,6 +1643,7 @@ def train(flags):
                     float(misc_stats.get("aux_loss20_precision", 0.0)),
                     float(misc_stats.get("aux_loss20_recall", 0.0)),
                     float(misc_stats.get("aux_loss20_positive_rate", 0.0)),
+                    float(loss_stats.get("appo_invalid_sample_fraction", 0.0)),
                     format_env_stat("city_tiles_final", 1),
                     format_env_stat("research_points", 1),
                     float(role_stats.get("builder_build_city_bias", 0.0)),

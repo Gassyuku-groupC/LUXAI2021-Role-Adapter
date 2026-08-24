@@ -18,6 +18,7 @@ from . import data_augmentation
 from .gate_policy import RuntimeGatePolicy
 from .role_assignment import RoleAssignmentConfig
 from .role_city_adapter import RoleCityAdapter
+from .trainable_role_bias import RoleBiasCodeBuilder
 from ..lux_gym import create_reward_space, LuxEnv, wrappers
 from ..lux_gym.act_spaces import ACTION_MEANINGS
 from ..utils import DEBUG_MESSAGE, RUNTIME_DEBUG_MESSAGE, LOCAL_EVAL
@@ -69,6 +70,10 @@ class RLAgent:
             base_dir=RL_AGENT_CONFIG_PATH.parent,
         )
         self.role_city_adapter = RoleCityAdapter.from_config(self.role_assignment_config)
+        self.role_code_builder = RoleBiasCodeBuilder(self.role_assignment_config)
+        self.role_local_adapter_enabled = bool(
+            getattr(self.model_flags, "role_local_adapter_enabled", False)
+        )
         role_trace_base = os.environ.get("LUX_ROLE_TRACE_PATH")
         self.role_trace_handle = None
         if role_trace_base:
@@ -340,6 +345,15 @@ class RLAgent:
                 max_cities=self.role_assignment_config.max_log_cities,
             ))
         env_output = self.get_env_output()
+        role_bias_codes = None
+        if self.role_local_adapter_enabled and role_snapshot is not None and role_active:
+            role_bias_codes = self.role_code_builder.build_player_from_snapshot(
+                self.game_state,
+                self.me,
+                self.opp,
+                role_snapshot,
+                env_output["info"]["available_actions_mask"],
+            )
         relevant_env_output_augmented = {
             "obs": self.augment_data(env_output["obs"], is_policy=False),
             "info": {
@@ -349,6 +363,20 @@ class RLAgent:
                                                             is_policy=True),
             },
         }
+        if role_bias_codes is not None:
+            relevant_env_output_augmented["info"]["role_bias_codes"] = self.augment_data(
+                role_bias_codes, is_policy=True
+            )
+            role_scale = self.role_assignment_config.bias_scale_for(
+                int(self.game_state.map_width)
+            )
+            augmentation_count = len(self.data_augmentations) + 1
+            relevant_env_output_augmented["info"]["role_bias_scale"] = torch.full(
+                (augmentation_count, 1, 1, 1, 1, 1),
+                float(role_scale),
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         self.stopwatch.stop().start("Model inference")
         with torch.no_grad():
@@ -357,16 +385,17 @@ class RLAgent:
                 "policy_logits": self.aggregate_augmented_predictions(agent_output_augmented["policy_logits"]),
                 "baseline": agent_output_augmented["baseline"].mean(dim=0, keepdim=True).cpu()
             }
-            agent_output["policy_logits"] = self.role_city_adapter.apply(
-                game_state=self.game_state,
-                player=self.me,
-                opponent=self.opp,
-                actionable_workers=self.loc_to_actionable_workers,
-                actionable_city_tiles=self.loc_to_actionable_city_tiles,
-                policy_logits=agent_output["policy_logits"],
-                available_actions_mask=env_output["info"]["available_actions_mask"],
-                player_id=obs.player,
-            )
+            if not self.role_local_adapter_enabled:
+                agent_output["policy_logits"] = self.role_city_adapter.apply(
+                    game_state=self.game_state,
+                    player=self.me,
+                    opponent=self.opp,
+                    actionable_workers=self.loc_to_actionable_workers,
+                    actionable_city_tiles=self.loc_to_actionable_city_tiles,
+                    policy_logits=agent_output["policy_logits"],
+                    available_actions_mask=env_output["info"]["available_actions_mask"],
+                    player_id=obs.player,
+                )
             agent_output["actions"] = {
                 key: models.DictActor.logits_to_actions(
                     torch.flatten(val, start_dim=0, end_dim=-2),
