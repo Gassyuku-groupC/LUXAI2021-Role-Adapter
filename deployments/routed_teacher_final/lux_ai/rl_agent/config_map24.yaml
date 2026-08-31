@@ -1,0 +1,158 @@
+name: conv_role_curriculum_stage4
+project: Lux_AI_2021
+entity: isaiahpressman
+group: role_curriculum_stage4
+act_space: BasicActionSpace
+obs_space: FixedShapeContinuousObsV2
+obs_space_kwargs: {}
+reward_space: LogScaleOutcomeReward
+reward_space_kwargs:
+  outcome_weight: 0.8
+  city_weight: 0.12
+  unit_weight: 0.08
+total_steps: 6400
+num_actors: 1
+n_actor_envs: 2
+unroll_length: 16
+batch_size: 16
+discounting: 0.999
+model_arch: conv_model
+n_blocks: 24
+hidden_dim: 128
+embedding_dim: 32
+n_merge_layers: 1
+normalize: false
+sum_player_embeddings: false
+use_index_select: false
+rescale_value_input: true
+rescale_se_input: true
+kernel_size: 5
+optimizer_class: Adam
+optimizer_kwargs:
+  lr: 1.0e-06
+  eps: 0.0003
+min_lr_mod: 0.01
+entropy_cost: 2.0e-05
+baseline_cost: 1.0
+teacher_kl_cost: 0.005
+teacher_baseline_cost: 0.0
+lmb: 0.9
+reduction: sum
+use_teacher: true
+teacher_load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/submission_packages/best_agent/lux_ai/rl_agent
+teacher_checkpoint_file: candidate_weights.pt
+actor_device: cuda:0
+learner_device: cuda:0
+model_log_freq: 100
+sharing_strategy: file_system
+disable_wandb: true
+debug: false
+use_mixed_precision: true
+checkpoint_freq: 5000
+num_learner_threads: 1
+normalize_actor_critic_losses: true
+normalize_policy_log_probs_by_actions: true
+training_spatial_augmentation: true
+training_player_swap_probability: 0.5
+training_player_swap_per_sample: true
+policy_advantage_clip: 3.0
+env_configuration:
+  width: 24
+  height: 24
+  loglevel: 0
+  trainingMapSizes:
+  - 16
+  - 16
+  - 16
+  - 24
+  - 24
+  - 24
+  - 24
+  - 32
+  trainingMapSampling: random
+spatial_risk_sidecar_enabled: false
+spatial_risk_attention_dim: 64
+spatial_risk_num_heads: 4
+spatial_risk_pool_size: 8
+sidecar_gate_hidden_channels: 16
+gate_only_training: false
+sidecar_freeze_base_agent: false
+risk_gate_enabled: false
+spatial_risk_sidecar_checkpoint: null
+use_aux_risk: false
+aux_risk_cost: 0.01
+aux_risk_horizon: 20
+aux_risk_hidden_channels: 128
+aux_risk_dropout: 0.1
+aux_risk_pos_weight_scale: 0.75
+aux_risk_threshold: 0.4
+load_dir: null
+checkpoint_file: candidate_weights.pt
+weights_only: true
+algo: appo_vtrace
+ppo_clip_ratio: 0.2
+reference_policy_kl_cost: 0.005
+teacher_bc_cost_start: 0.03
+teacher_bc_cost_end: 0.01
+teacher_bc_anneal_games: 100
+rl_policy_cost: 1.0
+total_games: 100
+risk_thresholds:
+  12: 0.9582753841190409
+  16: 0.9459641069457523
+  24: 0.9389875956490136
+  32: 0.8918934056850649
+safe_expansion_threshold: 0.8
+logit_bias_lambda: 4.0
+student_pretrain_checkpoint: null
+role_bias_training_enabled: true
+role_only_training: false
+role_small_map_policy_weight: 1.0
+role_hard_window_start: 20
+role_hard_window_weight: 2.5
+role_assignment:
+  enabled: true
+  bias_enabled: true
+  learnable_biases: false
+  cooldown_turns: 5
+  firefighter_override_cooldown: true
+  preserve_build_city_logit: true
+  bias_scale_by_map_size:
+    12: 0.35
+    16: 0.6
+    24: 0.5
+    32: 0.3
+  abandon_city_nights: 0.25
+  abandon_min_turn: 30
+  abandon_confirmation_turns: 3
+  abandon_max_cities: 1
+  abandon_max_fraction: 0.1
+  abandon_min_city_count: 3
+  abandon_min_fuel_distance: 6
+  abandon_rescue_distance: 6
+role_bias_initial:
+  harvester_move_bias: 0.35
+  harvester_mine_bias: 0.25
+  builder_build_city_bias: 1.0
+  builder_move_to_fuel_station_bias: 0.45
+  attacker_block_move_bias: 1.2
+  attacker_build_city_penalty: 2.0
+  firefighter_move_bias: 1.8
+  firefighter_transfer_bias: 1.2
+  firefighter_build_city_penalty: 2.5
+  depot_research_bias: 0.5
+  fuel_station_research_bias: 0.35
+  research_station_research_bias: 0.9
+  manufacturing_build_worker_bias: 1.1
+  sacrificial_noop_bias: 0.75
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/role_curriculum_stage4
+console_log_interval: 15.0
+role_sidecar_training: false
+role_local_adapter_enabled: true
+role_local_training: false
+role_local_hidden_channels: 16
+role_local_max_delta: 0.25
+role_joint_head_training: false
+role_local_bias_training: true
+role_local_learning_rate: 5.0e-06
+role_bias_learning_rate: 2.0e-06

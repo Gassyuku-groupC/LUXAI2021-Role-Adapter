@@ -1,0 +1,31 @@
+defaults:
+  - conv_teacher_mixed_opponents
+  - _self_
+
+name: conv_teacher_mixed_logscale
+group: teacher_mixed_logscale
+
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_first_breakthrough
+checkpoint_file: 10752.pt
+weights_only: true
+
+reward_space: LogScaleOutcomeReward
+reward_space_kwargs:
+  outcome_weight: 0.80
+  city_weight: 0.12
+  unit_weight: 0.08
+
+policy_head_learning_rate: 1.5e-6
+role_local_learning_rate: 1.5e-5
+role_bias_learning_rate: 1.5e-6
+reference_policy_kl_cost: 0.004
+teacher_bc_cost_start: 0.008
+teacher_bc_cost_end: 0.008
+
+total_games: 50
+checkpoint_freq: 3500
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_mixed_logscale
+
+hydra:
+  run:
+    dir: outputs/teacher_mixed_logscale/${now:%Y-%m-%d_%H-%M-%S}

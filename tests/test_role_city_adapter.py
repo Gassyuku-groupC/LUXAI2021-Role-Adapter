@@ -174,6 +174,18 @@ class RoleCityAdapterTests(unittest.TestCase):
 
         self.assertNotEqual(snapshot.city_roles["c0"].role, SACRIFICIAL_DECAY)
 
+    def test_city_assignment_never_emits_removed_fuel_station_role(self):
+        game = self.make_game(turn=30)
+        player, opponent = Player(0), Player(1)
+        for index in range(4):
+            self.add_city(player, f"c{index}", index * 2, 0, fuel=1000, upkeep=10)
+        game.map._setResource("wood", 0, 1, 500)
+        adapter = RoleCityAdapter.from_config(RoleAssignmentConfig(enabled=True))
+
+        snapshot = adapter.update(game_state=game, player=player, opponent=opponent)
+
+        self.assertNotIn("FuelStation", {state.role for state in snapshot.city_roles.values()})
+
     def test_update_budget_reuses_previous_snapshot_for_one_turn(self):
         game = self.make_game(turn=10)
         player, opponent = Player(0), Player(1)

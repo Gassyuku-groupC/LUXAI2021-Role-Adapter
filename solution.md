@@ -1,83 +1,50 @@
-# Solution Overview
+# Final Solution Overview
 
 ## Summary
 
-This agent is based on a strong reinforcement-learning Lux AI 2021 policy, packaged with an additional runtime diagnostic safety layer. The main design goal is to reduce catastrophic city loss without directly overwriting the base policy's learned micro-control.
-
-Earlier experiments showed that direct behavior cloning or actor fine-tuning can easily damage the original policy. Small policy changes shift the state visitation distribution, and the model may lose useful worker/city coordination learned by the base agent. For that reason, this version keeps the neural actor unchanged and adds a non-intrusive risk gate at inference time.
-
-## Base Agent
-
-The base policy is a neural RL agent with collision handling and action filtering. It remains responsible for normal gameplay:
-
-- worker movement
-- city expansion
-- research progression
-- transfer and collision-sensitive decisions
-- most city-tile production choices
-
-The packaged checkpoint is stored at:
+The final Agent is `routed_teacher_final`: a self-contained Lux AI 2021 submission that selects a validated policy checkpoint by map size, applies Rot180 inference, and adds positive Role-City guidance on 16x16, 24x24, and 32x32.
 
 ```text
-lux_ai/rl_agent/candidate_weights.pt
+12x12 -> er100_35072
+16x16 -> role_05376_nofs
+24x24 -> log_03584
+32x32 -> role_05376_nofs
 ```
 
-## Diagnostic Risk Layer
+All routes use Rot180. Role bias is bypassed on 12x12. Risk Gate is disabled and FuelStation is removed.
 
-The runtime gate uses small offline-trained risk scorers stored in:
+## Why Routing
 
-```text
-lux_ai/rl_agent/strategy_scorers/
-```
+Lux policies are highly map-size sensitive. A single small logit change can alter early expansion and create a large late-game snowball. Paired evaluation showed that no one continuation checkpoint dominated every map. Routing preserves each specialist only on the map where it was selected by replay evidence while keeping one shared observation/action interface.
 
-The scorers estimate large future city-loss risk from game-state features such as:
+## Role-City Adapter
 
-- map size
-- turn and day/night cycle
-- current city count and city tiles
-- worker/city-tile ratio
-- fuel, upkeep, and city fuel buffer statistics
-- low-fuel city counts
-- resource availability
+The Actor first produces normal policy logits. `RoleCityAdapter` classifies workers and cities, then applies bounded positive deltas before legal masking. It never directly forces an action.
 
-The labels used to train the diagnostic layer were mined from replay data. The important target is not simply "avoid any loss", because the official ranking is determined by final city tiles and units. Instead, the scorer focuses on dangerous situations where city loss is large enough to threaten the final result.
+- Harvester supports resource collection.
+- Builder supports expansion.
+- Firefighter supports movement and adjacent-unit fuel relay toward critical cities.
+- Attacker is lowest priority.
+- ResearchStation and ManufacturingPoint guide city actions.
+- SacrificialDecay is restricted to one strictly qualified city.
 
-## Runtime Gate
+BUILD_CITY is protected. City fuel is treated as a one-way reserve; transfer exists only between adjacent allied units.
 
-The gate is conservative. The base neural policy first proposes actions normally. The scorer is then evaluated once per turn. If risk is above threshold, only selected high-risk city-tile actions are filtered.
+## Training
 
-Current action scope:
+The system progressed from a frozen Role baseline through Role/Local APPO, targeted executable-opponent adaptation, weak best-policy KL anchoring, and limited Policy Head training. Terminal outcome remained the dominant reward. Checkpoints were selected only by paired matches, not by learner loss.
 
-```text
-BUILD_WORKER
-```
+## Evaluation
 
-The gate does not broadly block city building. This preserves the base policy's expansion behavior and avoids turning the agent into an overly defensive strategy.
+Against `first`, using ten fixed seeds, all map sizes, and both sides:
 
-## Map-Size Handling
+- 73 valid games and seven 32x32 timeouts;
+- 38 wins, completed-game win rate `52.1%`;
+- mean Score `150.49`, with `Score = city tiles + units`;
+- city margin `+7.86` and unit margin `+8.26`.
 
-The gate uses a shared timing profile on 12x12, 16x16, and 24x24 maps. For 32x32 maps, intervention is delayed because expansion remains valuable for longer and premature safety gating can hurt scale.
+12x12 remains the weakest map. 32x32 is strong in completed games but has unresolved local replay-generation/runtime timeout behavior.
 
-Important configuration values are in:
+## Research Extensions
 
-```text
-lux_ai/rl_agent/rl_agent_config.yaml
-```
-
-## Engineering Notes
-
-The gate is designed as a fallback-safe wrapper. If the risk scorer dependencies or model files cannot be loaded, the runtime scorer gate is disabled and the base policy continues to run.
-
-The package also limits CPU threading for more stable evaluation:
-
-```text
-runtime_torch_num_threads: 1
-```
-
-This helps avoid local timeout cascades when multiple Python agents are launched by the Lux CLI.
-
-## Validation Status
-
-The gate version has been validated as a packaged agent on small smoke tests. In current testing, it does not change results on some stable 12x12 and 16x16 games against the reference group agent. Further full-map validation is still required before using this branch as the primary tournament submission.
-
-For high-stakes matches, the base agent remains the conservative fallback unless the gate branch shows a clear same-seed improvement.
+The repository retains tile-level Spatial Risk Sidecar and zero-init Intervention Gate implementations. They are disabled in the final package because enabled candidates did not pass paired promotion tests.

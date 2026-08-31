@@ -1,0 +1,43 @@
+defaults:
+  - conv_teacher_joint_vs_first
+  - _self_
+
+name: conv_teacher_mixed_opponents
+group: teacher_mixed_opponents
+
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_first_breakthrough
+checkpoint_file: 10752.pt
+weights_only: true
+
+fixed_opponent_config: null
+fixed_opponent_checkpoint: null
+fixed_opponent_configs:
+  - D:/Luxai/Kaggle_Lux_AI_2021/outputs/submission_packages/best_agent/lux_ai/rl_agent/config.yaml
+  - D:/Luxai/Kaggle_Lux_AI_2021/internal_testing/hall_of_fame/11-24_12-56-23_062179520_must_research/lux_ai/rl_agent/config.yaml
+fixed_opponent_checkpoints:
+  - D:/Luxai/Kaggle_Lux_AI_2021/outputs/submission_packages/best_agent/lux_ai/rl_agent/candidate_weights.pt
+  - D:/Luxai/Kaggle_Lux_AI_2021/internal_testing/hall_of_fame/11-24_12-56-23_062179520_must_research/lux_ai/rl_agent/062179520_weights.pt
+
+role_joint_backbone_blocks: 0
+policy_head_learning_rate: 1.0e-6
+role_local_learning_rate: 1.0e-5
+role_bias_learning_rate: 1.0e-6
+
+reference_policy_kl_cost: 0.005
+teacher_bc_cost_start: 0.01
+teacher_bc_cost_end: 0.01
+
+env_configuration:
+  width: 24
+  height: 24
+  loglevel: 0
+  trainingMapSizes: [16, 16, 24, 24, 24, 24, 32, 32]
+  trainingMapSampling: random
+
+total_games: 50
+checkpoint_freq: 3500
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_mixed_opponents
+
+hydra:
+  run:
+    dir: outputs/teacher_mixed_opponents/${now:%Y-%m-%d_%H-%M-%S}

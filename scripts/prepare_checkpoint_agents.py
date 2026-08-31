@@ -134,6 +134,7 @@ def build_agent(
     if enable_role_adapter or role_local:
         agent_config_path = rl_dir / "rl_agent_config.yaml"
         agent_config = yaml.safe_load(agent_config_path.read_text(encoding="utf-8")) or {}
+        agent_config["data_augmentations"] = ["Rot180"]
         role_config = agent_config.setdefault("role_assignment", {})
         role_config.update({
             "enabled": True,
@@ -162,6 +163,10 @@ def build_agent(
                 ),
                 encoding="utf-8",
             )
+
+        packaged_config = yaml.safe_load(agent_config_path.read_text(encoding="utf-8")) or {}
+        if "Rot180" not in packaged_config.get("data_augmentations", []):
+            raise RuntimeError(f"Role package must enable Rot180: {output}")
 
 
 def main() -> None:
@@ -206,7 +211,9 @@ def main() -> None:
             preserve_runtime_config=args.preserve_runtime_config,
             enable_role_adapter=args.enable_role_adapter,
         )
-        print(f"Prepared {label}: {checkpoint} -> {destination}")
+        role_package = args.enable_role_adapter or is_role_local_state(load_model_state(checkpoint))
+        runtime_label = " | Rot180=ENABLED" if role_package else ""
+        print(f"Prepared {label}: {checkpoint} -> {destination}{runtime_label}")
 
 
 if __name__ == "__main__":

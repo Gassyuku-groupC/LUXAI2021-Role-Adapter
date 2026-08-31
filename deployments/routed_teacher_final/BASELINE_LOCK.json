@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "identity": "role_05376+Rot180",
+  "created_utc": "2026-08-24T15:51:54.242297+00:00",
+  "source": "D:\\Luxai\\Kaggle_Lux_AI_2021\\outputs\\checkpoint_selection\\agents\\role_05376",
+  "git_branch": "actor-sidecar-kl-appo",
+  "git_commit": "f4b8e2c06c6937e07f01542e688047edcb7aebbd",
+  "git_dirty_at_lock": true,
+  "package_tree_sha256": "f6ea0c5385754329b509049a0f72532330e481f5f056b845b78cb55b7c82b8b7",
+  "files": {
+    "lux_ai/rl_agent/candidate_weights.pt": "523d166361e18158ada242e3aa473b44323cb55f53ce152ca0dc7a948d887126",
+    "lux_ai/rl_agent/config.yaml": "4a9d44eb020aaf35855ba656e904ed4969d2faaabb18afcfd81a5d91dd8a4862",
+    "lux_ai/rl_agent/rl_agent_config.yaml": "cfb1954cc64d8a17f553e9a20e83243f5b60ecd51e7f419e27deee9cc7694bab",
+    "lux_ai/rl_agent/role_city_bias_params.yaml": "a5e5b7b848b469634f930f4318d4f06c8a861df6da7235116c96a2ebc8bbf9c6"
+  }
+}

@@ -29,6 +29,7 @@ role_bias_initial:
   harvester_move_bias: 0.35
   harvester_mine_bias: 0.25
   builder_build_city_bias: 1.00
+  # Legacy checkpoint slot; FuelStation is no longer assigned or consumed.
   builder_move_to_fuel_station_bias: 0.45
   attacker_block_move_bias: 1.20
   attacker_build_city_penalty: 2.00
@@ -36,6 +37,7 @@ role_bias_initial:
   firefighter_transfer_bias: 1.20
   firefighter_build_city_penalty: 2.50
   depot_research_bias: 0.50
+  # Legacy checkpoint slot; FuelStation is no longer assigned or consumed.
   fuel_station_research_bias: 0.35
   research_station_research_bias: 0.90
   manufacturing_build_worker_bias: 1.10

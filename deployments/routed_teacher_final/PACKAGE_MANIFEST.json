@@ -1,0 +1,36 @@
+{
+  "package": "routed_teacher_final",
+  "routes": {
+    "12x12": {
+      "agent": "er100_35072",
+      "checkpoint": "lux_ai/rl_agent/map12_candidate_weights.pt",
+      "rot180": true,
+      "role_bias_active": false,
+      "sha256": "20a6fae90957b5632efe69042d1f31eaaaa87801063ce468747927dd41112831"
+    },
+    "16x16": {
+      "agent": "role_05376_nofs",
+      "checkpoint": "lux_ai/rl_agent/candidate_weights.pt",
+      "rot180": true,
+      "role_bias_active": true,
+      "sha256": "523d166361e18158ada242e3aa473b44323cb55f53ce152ca0dc7a948d887126"
+    },
+    "24x24": {
+      "agent": "log_03584",
+      "checkpoint": "lux_ai/rl_agent/map24_candidate_weights.pt",
+      "rot180": true,
+      "role_bias_active": true,
+      "sha256": "20ebc2570e58938fcaadb2116b89438706eec301aa4fdb53074f2d3ff55fc34d"
+    },
+    "32x32": {
+      "agent": "role_05376_nofs",
+      "checkpoint": "lux_ai/rl_agent/candidate_weights.pt",
+      "rot180": true,
+      "role_bias_active": true,
+      "sha256": "523d166361e18158ada242e3aa473b44323cb55f53ce152ca0dc7a948d887126"
+    }
+  },
+  "runtime_config_sha256": "4d9c903bd5ef8aff3ddda888d12963478d85d0eff4f8a5bce497696ce8149bcd",
+  "risk_gate_enabled": false,
+  "fuel_station_role_present": false
+}

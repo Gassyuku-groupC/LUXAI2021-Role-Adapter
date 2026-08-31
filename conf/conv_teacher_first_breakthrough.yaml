@@ -1,0 +1,34 @@
+defaults:
+  - conv_teacher_joint_vs_first
+  - _self_
+
+name: conv_teacher_first_breakthrough
+group: teacher_first_breakthrough
+
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_joint_vs_first
+checkpoint_file: 05120.pt
+weights_only: true
+
+role_joint_backbone_blocks: 0
+policy_head_learning_rate: 3.0e-6
+role_local_learning_rate: 2.0e-5
+role_bias_learning_rate: 2.0e-6
+
+reference_policy_kl_cost: 0.002
+teacher_bc_cost_start: 0.005
+teacher_bc_cost_end: 0.005
+
+env_configuration:
+  width: 24
+  height: 24
+  loglevel: 0
+  trainingMapSizes: [16, 16, 16, 24, 24, 24, 24, 32]
+  trainingMapSampling: random
+
+total_games: 100
+checkpoint_freq: 3500
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_first_breakthrough
+
+hydra:
+  run:
+    dir: outputs/teacher_first_breakthrough/${now:%Y-%m-%d_%H-%M-%S}

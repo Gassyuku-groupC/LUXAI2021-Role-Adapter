@@ -1,61 +1,58 @@
-# Lux AI 2021 Role-Conditioned Agent
+# Lux AI 2021 Role-Conditioned Routed Agent
 
-This repository extends the Lux AI 2021 first-place training stack while preserving its legacy 24-block ResNet Actor. The current promoted local baseline is `role_05376 + Rot180`. Its central addition is a plug-and-play Role-City policy adapter; spatial risk Sidecar and intervention Gate research remain implemented but are disabled in the promoted inference path because their evaluated checkpoints did not improve competitive results.
+This repository extends the Lux AI 2021 first-place training stack while retaining its 24-block ResNet Actor. The final evaluated deployment is `routed_teacher_final`, a map-routed policy with Rot180 inference and a plug-and-play Role-City adapter.
 
-The repository contains source code and configuration. Model weights, replays, datasets, experiment outputs, and local opponent packages are excluded from Git.
+## Final Deployment
 
-## Current Promoted Architecture
+| Map | Policy checkpoint | Rot180 | Role bias |
+|---|---|:---:|:---:|
+| 12x12 | `er100_35072` | ON | OFF |
+| 16x16 | `role_05376_nofs` | ON | ON |
+| 24x24 | `log_03584` | ON | ON |
+| 32x32 | `role_05376_nofs` | ON | ON |
+
+The self-contained package is stored in [`deployments/routed_teacher_final`](deployments/routed_teacher_final). Its three `.pt` files are tracked by Git LFS. Risk Gate is disabled, the obsolete FuelStation role is removed, and BUILD_CITY remains protected from negative Role bias.
 
 ```text
 Game observation
-  -> legacy 24-block ResNet Actor
-  -> Rot180 test-time policy ensemble
-  -> worker and city action logits
-  -> RoleCityAdapter soft positive guidance
-  -> legal-action mask and collision resolution
+  -> map-size checkpoint router
+  -> 24-block ResNet Actor
+  -> Rot180 policy ensemble
+  -> RoleCityAdapter positive soft guidance (16/24/32)
+  -> legal-action mask and collision handling
   -> Lux commands
 ```
 
-Role-City is the core project contribution:
+## Role-City Contribution
 
-- Unit roles: Harvester, Builder, Firefighter, and lowest-priority Attacker.
-- City roles: FuelDepot, FuelStation, ResearchStation, ManufacturingPoint, and strictly bounded SacrificialDecay.
-- Five-turn role cooldown with a critical Firefighter override.
-- Additive legal-action logit bias; no hard action forcing.
-- Adjacent allied-unit relay semantics for transfer; workers never transfer directly to cities.
-- Compact NumPy state, vectorized distances, grid-neighbor lookup, and bounded runtime fallback.
-- `preserve_build_city_logit` prevents Attacker/Firefighter rules from suppressing the Actor's expansion decision.
+- Worker roles: Harvester, Builder, Firefighter, and lowest-priority Attacker.
+- City roles: FuelDepot, ResearchStation, ManufacturingPoint, and strictly bounded SacrificialDecay.
+- Five-turn role cooldown with critical Firefighter override.
+- Positive additive logit guidance; no hard action forcing.
+- Transfer guidance only between adjacent allied units.
+- Compact NumPy state, vectorized distance computation, grid-neighbor lookup, and bounded runtime fallback.
+- `preserve_build_city_logit` prevents Role logic from suppressing expansion.
 
-## Research Extensions
+## Final Evaluation
 
-The codebase also retains two independently switchable research components:
+Against `first`, seeds `20260920` through `20260929`, all four map sizes and both sides:
 
-- `SpatialRiskAttentionSidecar`: detached Actor features, pooled-KV MHA, and tile-level risk/safe-expansion maps.
-- `InterventionGate`: zero-initialized additive logit delta with legal masking and calibrated map/phase rules.
+- 73 completed games and 7 timeouts, all on 32x32;
+- 38 wins, completed-game win rate `52.1%`;
+- mean Score `150.49`, where `Score = final city tiles + final units`;
+- mean city margin `+7.86` and unit margin `+8.26`.
 
-These modules establish checkpoint-compatible risk diagnosis and Step-0-equivalent intervention. They are not credited for the current `role_05376` performance and are OFF in the promoted package. Failed Sidecar/Gate and Stage4 checkpoints are not repository assets.
+See [`deployments/routed_teacher_final/EVALUATION.md`](deployments/routed_teacher_final/EVALUATION.md) for the map-level breakdown. Timeouts are always reported separately and are never silently counted as completed losses.
 
-## Training Direction
+## Training And Reproduction
 
-```text
-deduplicated best/C and external replays
-  -> replay/seed-grouped splits
-  -> critical-state catalog
-  -> same-state Margin/DPO or critical focal BC
-  -> Role/Local Adapter training
-  -> policy-head and final-block unfreezing only after explicit gates
-  -> state-adaptive KL-APPO and executable-opponent PFSP
-  -> paired Development, Promotion, and Holdout evaluation
-```
+- [METHODOLOGY.md](METHODOLOGY.md): architecture, training decisions, and evidence boundaries.
+- [TRAINING.md](TRAINING.md): required local artifacts, training stages, packaging, and evaluation commands.
+- [ROLE.md](ROLE.md): exact Role-City semantics and runtime constraints.
+- [solution.md](solution.md): concise final-system overview.
+- [conf/evaluation/paired_seed_suites.yaml](conf/evaluation/paired_seed_suites.yaml): preregistered paired evaluation seeds.
 
-Full-frame behavior cloning and Stage4 role-local curriculum are retired because they reduced BUILD_CITY frequency and competitive strength. Current training protects expansion and promotes checkpoints only through matched replay evidence.
-
-## Reproducibility
-
-- [METHODOLOGY.md](METHODOLOGY.md): architecture, evidence status, and learning method.
-- [TRAINING.md](TRAINING.md): local artifacts, baseline locking, training and evaluation commands.
-- [ROLE.md](ROLE.md): Role-City semantics and runtime constraints.
-- [conf/evaluation/paired_seed_suites.yaml](conf/evaluation/paired_seed_suites.yaml): preregistered non-overlapping paired seeds.
+Spatial Risk Sidecar and Intervention Gate code remains available for reproducible research, but those modules are disabled in the final deployment because evaluated candidates did not improve competitive results.
 
 ## Attribution
 

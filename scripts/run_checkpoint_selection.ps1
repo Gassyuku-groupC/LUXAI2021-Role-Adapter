@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("phase1", "phase2", "rescue", "distill", "repro", "rolelocal", "stageA", "stage4", "rot180")]
+    [ValidateSet("phase1", "phase2", "rescue", "distill", "repro", "rolelocal", "stageA", "stage4", "rot180", "outcome", "outcome24", "outcome32", "teacher_eval", "teacher_eval16", "teacher_eval24", "teacher_eval32")]
     [string]$Phase = "phase1",
     [string[]]$Checkpoints = @("bc", "10816", "20128", "30272", "40288", "50112", "60288", "70560"),
     [int[]]$Seeds = @(20260824),
@@ -28,7 +28,7 @@ $EvalOpponents = Join-Path $PhaseRoot "_eval_opponents"
 if ($MapSizes.Count -eq 0) {
     $MapSizes = if ($Phase -eq "phase1") { @(12, 24) } else { @(12, 16, 24, 32) }
 }
-$Opponents = if ($Phase -in @("phase1", "rescue", "distill", "repro", "rolelocal", "stageA", "stage4", "rot180")) { @("best_agent") } else { @("best_agent", "first", "stage350", "stage400") }
+$Opponents = if ($Phase -in @("phase1", "rescue", "distill", "repro", "rolelocal", "stageA", "stage4", "rot180", "outcome", "outcome24", "outcome32", "teacher_eval", "teacher_eval16", "teacher_eval24", "teacher_eval32")) { @("best_agent") } else { @("best_agent", "first", "stage350", "stage400") }
 
 if (-not $SkipPackaging) {
     & $Python (Join-Path $PSScriptRoot "prepare_checkpoint_agents.py")
