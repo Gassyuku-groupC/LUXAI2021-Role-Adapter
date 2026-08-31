@@ -17,6 +17,9 @@ from lux_ai.torchbeast.monobeast import (
     compute_teacher_bc_loss,
     compute_teacher_kl_loss,
     configure_role_joint_head_training,
+    mask_fixed_opponent_actions_taken,
+    replace_fixed_opponent_actions,
+    replace_fixed_opponent_pool_actions,
 )
 from lux_ai.torchbeast.pfsp import LeagueOpponent, PFSPOpponentSampler
 
@@ -36,6 +39,47 @@ class FullRebuildComponentsTest(unittest.TestCase):
         self.assertFalse(SidecarAgentWrapper.map_phase_active(24, 79, 0))
         self.assertTrue(SidecarAgentWrapper.map_phase_active(24, 79, 1))
         self.assertTrue(SidecarAgentWrapper.map_phase_active(32, 0, 0))
+
+    def test_fixed_opponent_replaces_and_masks_only_nonlearner_side(self):
+        learner_actions = torch.zeros(2, 1, 2, 3, 3, 1, dtype=torch.long)
+        opponent_actions = torch.full_like(learner_actions, 7)
+        learner_output = {"actions": {"worker": learner_actions}}
+        opponent_output = {"actions": {"worker": opponent_actions}}
+
+        replace_fixed_opponent_actions(learner_output, opponent_output, (0, 1))
+
+        self.assertTrue((learner_actions[0, :, 0] == 0).all())
+        self.assertTrue((learner_actions[0, :, 1] == 7).all())
+        self.assertTrue((learner_actions[1, :, 0] == 7).all())
+        self.assertTrue((learner_actions[1, :, 1] == 0).all())
+
+        actions_taken = torch.ones(2, 1, 2, 3, 3, 1, dtype=torch.bool)
+        env_output = {"info": {"actions_taken": {"worker": actions_taken}}}
+        mask_fixed_opponent_actions_taken(env_output, (0, 1))
+        self.assertTrue(actions_taken[0, :, 0].all())
+        self.assertFalse(actions_taken[0, :, 1].any())
+        self.assertFalse(actions_taken[1, :, 0].any())
+        self.assertTrue(actions_taken[1, :, 1].all())
+
+    def test_fixed_opponent_pool_honors_per_environment_selection(self):
+        learner_actions = torch.zeros(2, 1, 2, 3, 3, 1, dtype=torch.long)
+        learner_output = {"actions": {"worker": learner_actions}}
+        opponent_outputs = [
+            {"actions": {"worker": torch.full_like(learner_actions, value)}}
+            for value in (3, 5, 7)
+        ]
+
+        replace_fixed_opponent_pool_actions(
+            learner_output,
+            opponent_outputs,
+            learner_players=(0, 1),
+            opponent_indices=(2, 0),
+        )
+
+        self.assertTrue((learner_actions[0, :, 0] == 0).all())
+        self.assertTrue((learner_actions[0, :, 1] == 7).all())
+        self.assertTrue((learner_actions[1, :, 0] == 3).all())
+        self.assertTrue((learner_actions[1, :, 1] == 0).all())
 
     def test_safe_expansion_whitelist_and_soft_bias(self):
         gate = SidecarLogitDeltaGate()

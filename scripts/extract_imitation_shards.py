@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import torch
+import yaml
 
 from imitation_learning_utils import (
     action_placeholder,
@@ -99,7 +100,11 @@ def _append_sample(buffers: dict, env_output: dict, target: dict, meta: dict, we
     buffers["weights"].append(torch.tensor(weight, dtype=torch.float32))
     buffers["critical_mask"].append(torch.tensor(float(meta.get("critical_mask", 0.0)), dtype=torch.float32))
     buffers["counterfactual_scale"].append(torch.tensor(float(meta.get("counterfactual_scale", 1.0)), dtype=torch.float32))
-    buffers["meta"].append(meta)
+    sample_type = {"strict_dpo": 0, "near_weak_preference": 1, "critical_focal_bc": 2}.get(
+        str(meta.get("sample_type", "critical_focal_bc")), 2
+    )
+    buffers["sample_type"].append(torch.tensor(sample_type, dtype=torch.int64))
+    buffers["meta"].append({key: value for key, value in meta.items() if key != "rejected_target"})
     for key, value in env_output["obs"].items():
         buffers["obs"][key].append(value.squeeze(0).cpu())
     for key, value in env_output["info"]["available_actions_mask"].items():
@@ -110,6 +115,8 @@ def _append_sample(buffers: dict, env_output: dict, target: dict, meta: dict, we
     buffers["role_bias_scale"].append(env_output["info"]["role_bias_scale"].squeeze(0).cpu())
     for key, value in target.items():
         buffers["actions_taken"][key].append(torch.from_numpy(value).cpu())
+    for key, value in meta["rejected_target"].items():
+        buffers["rejected_actions"][key].append(torch.from_numpy(value).cpu())
 
 
 def _empty_buffers() -> dict:
@@ -117,12 +124,14 @@ def _empty_buffers() -> dict:
         "obs": defaultdict(list),
         "available_actions_mask": defaultdict(list),
         "actions_taken": defaultdict(list),
+        "rejected_actions": defaultdict(list),
         "input_mask": [],
         "role_bias_codes": defaultdict(list),
         "role_bias_scale": [],
         "weights": [],
         "critical_mask": [],
         "counterfactual_scale": [],
+        "sample_type": [],
         "meta": [],
     }
 
@@ -139,12 +148,16 @@ def _flush(buffers: dict, output_dir: Path, shard_index: int) -> int:
         "actions_taken": {
             key: torch.stack(values).to(torch.bool) for key, values in buffers["actions_taken"].items()
         },
+        "rejected_actions": {
+            key: torch.stack(values).to(torch.bool) for key, values in buffers["rejected_actions"].items()
+        },
         "input_mask": torch.stack(buffers["input_mask"]),
         "role_bias_codes": {key: torch.stack(values) for key, values in buffers["role_bias_codes"].items()},
         "role_bias_scale": torch.stack(buffers["role_bias_scale"]),
         "weights": torch.stack(buffers["weights"]),
         "critical_mask": torch.stack(buffers["critical_mask"]),
         "counterfactual_scale": torch.stack(buffers["counterfactual_scale"]),
+        "sample_type": torch.stack(buffers["sample_type"]),
         "meta": buffers["meta"],
     }
     out_path = output_dir / f"shard_{shard_index:05d}.pt"
@@ -175,6 +188,11 @@ def main() -> None:
     parser.add_argument("--split", choices=["", "train", "validation", "calibration"], default="")
     parser.add_argument("--critical-min-scale-delta", type=float, default=0.02)
     parser.add_argument(
+        "--role-assignment-config",
+        type=Path,
+        help="YAML containing role_assignment; overrides the agent model config for role-code extraction.",
+    )
+    parser.add_argument(
         "--map-sizes",
         default="",
         help="Comma-separated map sizes to keep, for example 12,16. Empty keeps all maps.",
@@ -183,7 +201,13 @@ def main() -> None:
 
     flags = load_agent_flags(args.agent_dir)
     grouped = load_index(args.index, args.max_rows, parse_int_set(args.map_sizes), args.split)
-    role_config = RoleAssignmentConfig.from_mapping(getattr(flags, "role_assignment", {}))
+    role_mapping = getattr(flags, "role_assignment", {})
+    role_base_dir = None
+    if args.role_assignment_config:
+        role_payload = yaml.safe_load(args.role_assignment_config.read_text(encoding="utf-8")) or {}
+        role_mapping = role_payload.get("role_assignment", role_payload)
+        role_base_dir = args.role_assignment_config.parent
+    role_config = RoleAssignmentConfig.from_mapping(role_mapping, base_dir=role_base_dir)
     buffers = _empty_buffers()
     shard_index = 0
     total = 0
@@ -208,7 +232,9 @@ def main() -> None:
                     replay_updates(replay, current_step),
                 )
             env_output = attach_role_bias_codes(env_output_for_current_state(env, placeholder), env, role_builder)
-            actions = json.loads(row.get("actions_json") or "[]")
+            actions = json.loads(
+                row.get("preferred_actions_json") or row.get("actions_json") or "[]"
+            )
             if not actions and replay.get("steps"):
                 actions = replay["steps"][row["action_step"]][row["teacher_player"]].get("action") or []
             target = teacher_actions_to_mask(
@@ -218,6 +244,14 @@ def main() -> None:
             )
             if not any(value.any() for value in target.values()):
                 continue
+            rejected_actions = json.loads(row.get("rejected_actions_json") or "[]")
+            if any(str(action).strip().startswith("bcity ") for action in rejected_actions):
+                continue
+            rejected_target = teacher_actions_to_mask(
+                env.unwrapped[0].game_state,
+                row["teacher_player"],
+                rejected_actions,
+            )
             _append_sample(
                 buffers,
                 env_output,
@@ -236,6 +270,8 @@ def main() -> None:
                         abs(float(row.get("counterfactual_scale", 1.0) or 1.0) - 1.0)
                         >= args.critical_min_scale_delta
                     ),
+                    "sample_type": row.get("sample_type", "critical_focal_bc"),
+                    "rejected_target": rejected_target,
                 },
                 row["weight"],
             )

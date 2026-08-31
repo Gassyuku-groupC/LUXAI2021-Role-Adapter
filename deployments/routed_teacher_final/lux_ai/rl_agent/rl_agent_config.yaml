@@ -1,0 +1,39 @@
+device: cuda:0
+use_collision_detection: true
+must_research: true
+can_build_carts: false
+data_augmentations:
+- Rot180
+role_assignment:
+  enabled: true
+  dry_run_logging: false
+  bias_enabled: true
+  learnable_biases: false
+  bias_params_path: role_city_bias_params.yaml
+  annotate_summary: false
+  cooldown_turns: 5
+  firefighter_override_cooldown: true
+  bias_disabled_map_sizes:
+  - 12
+  bias_disabled_players_by_map: {}
+  bias_scale_by_map_size:
+    12: 0.0
+    16: 0.6
+    24: 0.5
+    32: 0.3
+  max_biased_workers_by_map_size:
+    12: 32
+    16: 64
+    24: 64
+    32: 64
+  safety_only_map_sizes: []
+  update_time_budget_seconds: 1.5
+  preserve_build_city_logit: true
+runtime_scorer_gate_enabled: false
+model_route_by_map_size:
+  24:
+    model_config: config_map24.yaml
+    checkpoint: map24_candidate_weights.pt
+  12:
+    model_config: config_map12.yaml
+    checkpoint: map12_candidate_weights.pt

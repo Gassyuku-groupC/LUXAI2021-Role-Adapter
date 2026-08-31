@@ -72,7 +72,7 @@ def load_training_model_state(model: nn.Module, state_dict: Dict, flags: SimpleN
             incompatible = model.load_state_dict(retained, strict=False)
             invalid_missing = [
                 key for key in incompatible.missing_keys
-                if not key.startswith("role_local_adapter.")
+                if not key.startswith(("role_local_adapter.", "role_bias_layer."))
             ]
             if invalid_missing or incompatible.unexpected_keys:
                 raise RuntimeError(
@@ -219,8 +219,32 @@ def configure_role_joint_head_training(model: nn.Module, training: bool) -> None
     for module in (*head_modules, model.role_bias_layer, model.role_local_adapter):
         for parameter in module.parameters():
             parameter.requires_grad_(True)
-    model.set_policy_head_training(True)
+    tail_blocks = int(getattr(model, "role_joint_backbone_blocks", 0))
+    if tail_blocks > 0:
+        residual_blocks = list(model.base_agent.base_model.children())[1:]
+        if tail_blocks > len(residual_blocks):
+            raise ValueError(
+                f"role_joint_backbone_blocks={tail_blocks} exceeds residual block count "
+                f"{len(residual_blocks)}"
+            )
+        for block in residual_blocks[-tail_blocks:]:
+            for parameter in block.parameters():
+                parameter.requires_grad_(True)
+    if hasattr(model, "set_backbone_tail_training"):
+        model.set_backbone_tail_training(tail_blocks)
+    if hasattr(model, "set_policy_head_training"):
+        model.set_policy_head_training(training)
     model.train(training)
+    if not hasattr(model, "set_backbone_tail_training"):
+        model.base_agent.base_model.eval()
+        if training and tail_blocks > 0:
+            for block in residual_blocks[-tail_blocks:]:
+                block.train(True)
+    if not hasattr(model, "set_policy_head_training"):
+        for module in head_modules:
+            module.train(training)
+    model.role_bias_layer.train(training)
+    model.role_local_adapter.train(training)
 
 
 def create_role_code_builder(flags) -> Optional[RoleBiasCodeBuilder]:
@@ -618,6 +642,93 @@ def role_repair_advantage_weights(batch, advantages: torch.Tensor, flags) -> tor
     return weights
 
 
+def load_fixed_opponents(flags: SimpleNamespace) -> list[nn.Module]:
+    config_paths = list(getattr(flags, "fixed_opponent_configs", []) or [])
+    checkpoint_paths = list(getattr(flags, "fixed_opponent_checkpoints", []) or [])
+    if not config_paths and not checkpoint_paths:
+        config_path = getattr(flags, "fixed_opponent_config", None)
+        checkpoint_path = getattr(flags, "fixed_opponent_checkpoint", None)
+        if not config_path or not checkpoint_path:
+            return []
+        config_paths = [config_path]
+        checkpoint_paths = [checkpoint_path]
+    if len(config_paths) != len(checkpoint_paths) or not config_paths:
+        raise ValueError("fixed opponent config/checkpoint lists must be non-empty and equal length")
+    models = []
+    for config_path, checkpoint_path in zip(config_paths, checkpoint_paths):
+        opponent_flags = flags_to_namespace(OmegaConf.to_container(OmegaConf.load(config_path)))
+        model = create_model(opponent_flags, flags.actor_device)
+        checkpoint = torch.load(checkpoint_path, map_location=flags.actor_device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        model.eval()
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        models.append(model)
+    return models
+
+
+def replace_fixed_opponent_actions(
+        learner_output: Dict,
+        opponent_output: Dict,
+        learner_players: Tuple[int, ...],
+) -> Dict:
+    for action_space, learner_actions in learner_output["actions"].items():
+        opponent_actions = opponent_output["actions"][action_space]
+        if learner_actions.shape != opponent_actions.shape or learner_actions.dim() < 4:
+            raise ValueError(f"Fixed-opponent action shape mismatch for {action_space}")
+        player_dim = learner_actions.dim() - 4
+        for env_index, learner_player in enumerate(learner_players):
+            index = [slice(None)] * learner_actions.dim()
+            index[0] = env_index
+            index[player_dim] = 1 - int(learner_player)
+            learner_actions[tuple(index)] = opponent_actions[tuple(index)]
+    return learner_output
+
+
+def replace_fixed_opponent_pool_actions(
+        learner_output: Dict,
+        opponent_outputs: list[Dict],
+        learner_players: Tuple[int, ...],
+        opponent_indices: Optional[Tuple[int, ...]] = None,
+) -> Dict:
+    if not opponent_outputs:
+        return learner_output
+    if opponent_indices is None:
+        opponent_indices = tuple(
+            env_index % len(opponent_outputs) for env_index in range(len(learner_players))
+        )
+    if len(opponent_indices) != len(learner_players):
+        raise ValueError("Fixed-opponent index count must match learner player count")
+    for env_index, learner_player in enumerate(learner_players):
+        opponent_index = int(opponent_indices[env_index])
+        if not 0 <= opponent_index < len(opponent_outputs):
+            raise ValueError(f"Fixed-opponent index out of range: {opponent_index}")
+        opponent_output = opponent_outputs[opponent_index]
+        for action_space, learner_actions in learner_output["actions"].items():
+            opponent_actions = opponent_output["actions"][action_space]
+            if learner_actions.shape != opponent_actions.shape or learner_actions.dim() < 4:
+                raise ValueError(f"Fixed-opponent action shape mismatch for {action_space}")
+            player_dim = learner_actions.dim() - 4
+            index = [slice(None)] * learner_actions.dim()
+            index[0] = env_index
+            index[player_dim] = 1 - int(learner_player)
+            learner_actions[tuple(index)] = opponent_actions[tuple(index)]
+    return learner_output
+
+
+def mask_fixed_opponent_actions_taken(env_output: Dict, learner_players: Tuple[int, ...]) -> None:
+    actions_taken = env_output.get("info", {}).get("actions_taken", {})
+    for value in actions_taken.values():
+        if value.dim() < 4:
+            raise ValueError(f"Unexpected actions_taken shape: {tuple(value.shape)}")
+        player_dim = value.dim() - 4
+        for env_index, learner_player in enumerate(learner_players):
+            index = [slice(None)] * value.dim()
+            index[0] = env_index
+            index[player_dim] = 1 - int(learner_player)
+            value[tuple(index)] = False
+
+
 @torch.no_grad()
 def act(
         flags: SimpleNamespace,
@@ -637,6 +748,15 @@ def act(
         timings = prof.Timings()
 
         env = create_env(flags, device=flags.actor_device, teacher_flags=teacher_flags)
+        fixed_opponent_models = load_fixed_opponents(flags)
+        learner_players = tuple(
+            (actor_index * flags.n_actor_envs + env_index) % 2
+            for env_index in range(flags.n_actor_envs)
+        )
+        opponent_indices = [
+            (actor_index * flags.n_actor_envs + env_index) % len(fixed_opponent_models)
+            for env_index in range(flags.n_actor_envs)
+        ] if fixed_opponent_models else []
         role_code_builder = create_role_code_builder(flags)
         if flags.seed is not None:
             env.seed(flags.seed + actor_index * flags.n_actor_envs)
@@ -645,6 +765,13 @@ def act(
         env_output = add_role_codes_if_enabled(env.reset(force=True), env, role_code_builder)
         agent_output = actor_model(env_output)
         agent_output = apply_runtime_gate_to_actor_output(agent_output, env, flags)
+        if fixed_opponent_models:
+            agent_output = replace_fixed_opponent_pool_actions(
+                agent_output,
+                [model(env_output) for model in fixed_opponent_models],
+                learner_players,
+                tuple(opponent_indices),
+            )
         agent_output.pop("role_local_deltas", None)
         while True:
             index = free_queue.get()
@@ -660,6 +787,13 @@ def act(
 
                 agent_output = actor_model(env_output)
                 agent_output = apply_runtime_gate_to_actor_output(agent_output, env, flags)
+                if fixed_opponent_models:
+                    agent_output = replace_fixed_opponent_pool_actions(
+                        agent_output,
+                        [model(env_output) for model in fixed_opponent_models],
+                        learner_players,
+                        tuple(opponent_indices),
+                    )
                 agent_output.pop("role_local_deltas", None)
                 timings.time("model")
 
@@ -673,11 +807,21 @@ def act(
                         key: val for key, val in env_output["info"].items() if key.startswith("LOGGING_")
                     }
 
+                    if fixed_opponent_models:
+                        done_by_env = cached_done.reshape(cached_done.shape[0], -1).any(dim=1)
+                        for env_index, is_done in enumerate(done_by_env.tolist()):
+                            if is_done:
+                                opponent_indices[env_index] = (
+                                    opponent_indices[env_index] + 1
+                                ) % len(fixed_opponent_models)
+
                     env_output = env.reset()
                     env_output["reward"] = cached_reward
                     env_output["done"] = cached_done
                     env_output["info"]["actions_taken"] = cached_info_actions_taken
                     env_output["info"].update(cached_info_logging)
+                if fixed_opponent_models:
+                    mask_fixed_opponent_actions_taken(env_output, learner_players)
                 env_output = add_role_codes_if_enabled(env_output, env, role_code_builder)
                 timings.time("step")
 
@@ -1329,6 +1473,18 @@ def train(flags):
         wandb.watch(learner_model, flags.model_log_freq, log="all", log_graph=True)
 
     if getattr(flags, "role_joint_head_training", False):
+        learner_model.role_joint_backbone_blocks = int(
+            getattr(flags, "role_joint_backbone_blocks", 0)
+        )
+        configure_role_joint_head_training(learner_model, training=True)
+        backbone_params = [
+            parameter
+            for module in list(learner_model.base_agent.base_model.children())[1:][
+                -int(getattr(flags, "role_joint_backbone_blocks", 0)):
+            ]
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ] if int(getattr(flags, "role_joint_backbone_blocks", 0)) > 0 else []
         policy_params = [
             parameter
             for module in (
@@ -1348,8 +1504,9 @@ def train(flags):
             parameter for parameter in learner_model.role_bias_layer.parameters()
             if parameter.requires_grad
         ]
-        optimizer_params = policy_params + local_params + role_params
+        optimizer_params = backbone_params + policy_params + local_params + role_params
         optimizer_groups = [
+            {"params": backbone_params, "lr": float(flags.backbone_tail_learning_rate)},
             {"params": policy_params, "lr": float(flags.policy_head_learning_rate)},
             {"params": local_params, "lr": float(flags.role_local_learning_rate)},
             {"params": role_params, "lr": float(flags.role_bias_learning_rate)},

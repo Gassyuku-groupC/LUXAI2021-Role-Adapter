@@ -1,5 +1,7 @@
 # Best/C Replay Catalog
 
+> Status: reproducible offline-data pipeline. The catalog supported diagnosis and training design, but generated datasets are local artifacts and are not required to run `deployments/routed_teacher_final`.
+
 `build_best_c_replay_catalog.py` treats Group C in `first battle` and deployed
 `best_agent` opponents as the same teacher identity. Replays are deduplicated by
 map, seed, and the complete action sequence. Stateful and command-only copies of

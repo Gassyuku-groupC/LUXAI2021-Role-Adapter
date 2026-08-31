@@ -1,14 +1,15 @@
-# Training and Evaluation
+# Training, Packaging, And Evaluation
 
 Commands assume PowerShell and `D:\Luxai\Kaggle_Lux_AI_2021`.
 
-## Local Artifacts
+## Repository And Local Artifacts
 
-Weights, replay corpora, generated agents, and outputs are intentionally not stored in Git. Expected local inputs include:
+Git contains all source, successful training configurations, tests, packaging scripts, documentation, and the final self-contained deployment under `deployments/routed_teacher_final`. Final `.pt` files use Git LFS.
+
+Large datasets, replay corpora, generated outputs, intermediate checkpoints, logs, and opponent packages remain local and ignored. Expected local training inputs include:
 
 ```text
 outputs/submission_packages/best_agent/
-outputs/checkpoint_selection/agents/role_05376/
 internal_testing/hall_of_fame/11-24_12-56-23_062179520_must_research/
 dataset/raw/data/
 replays/first battle/
@@ -16,85 +17,130 @@ replays/first battle/
 
 Use `.venv\Scripts\python.exe`; global Python may not contain the pinned Lux dependencies.
 
-## Lock The Promoted Baseline
+## Final Route
 
-After checking out the intended code revision:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\lock_role_baseline.py
+```text
+12x12 -> er100_35072 + Rot180, Role bias OFF
+16x16 -> role_05376_nofs + Rot180, Role bias ON
+24x24 -> log_03584 + Rot180, Role bias ON
+32x32 -> role_05376_nofs + Rot180, Role bias ON
 ```
 
-This copies `role_05376 + Rot180` to `outputs/submission_packages/role_05376_rot180_locked` and writes `BASELINE_LOCK.json` containing the Git revision and SHA256 hashes of weights, model config, runtime config, and Role YAML. Refuse overwrite unless `--force` is explicitly supplied.
+The successful configuration chain retained in `conf/` covers Role repair, outcome APPO, targeted `first` training, mixed executable opponents, log-scale outcome training, and edge repair. Sidecar/Gate and Stage4 configurations are research references, not final continuation points.
 
-## Replay Catalog And Critical States
+## Training Commands
 
-Build a deduplicated best/C catalog before extracting samples:
+Inspect a configuration before starting:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\build_best_c_replay_catalog.py --help
-.\.venv\Scripts\python.exe .\scripts\build_weighted_bc_index_from_catalog.py --help
-.\.venv\Scripts\python.exe .\scripts\audit_role_assignments.py --help
+.\.venv\Scripts\python.exe .\run_monobeast.py `
+  --config-name conv_role_local_outcome_appo --cfg job
 ```
 
-All frames from a replay/seed group stay in one split. B/G winner replays are offline expert evidence, not executable PFSP opponents. Failed windows are excluded from positive global BC and retained for critical-state analysis.
+Run Role/Local outcome APPO:
 
-## Current Role Training Surface
+```powershell
+.\.venv\Scripts\python.exe .\run_monobeast.py `
+  --config-name conv_role_local_outcome_appo
+```
 
-The promoted Actor and Rot180 runtime are the baseline. New experiments begin with Role bias and Role-conditioned Local Adapter parameters only. They may progress to the final policy head and ResNet blocks 23-24 only after critical-state margin and action-flip gates pass.
+Run targeted executable-opponent adaptation:
 
-Hard constraints:
+```powershell
+.\.venv\Scripts\python.exe .\run_monobeast.py `
+  --config-name conv_role_vs_first_targeted
+```
 
-- no fixed BUILD_CITY penalty;
-- five-turn cooldown;
-- Firefighter override only for a critical non-Sacrificial city;
-- adjacent allied-unit transfer relay only;
-- Attacker has lowest priority;
-- at most one strictly qualified SacrificialDecay city;
-- Sidecar and Risk Gate disabled unless an experiment explicitly evaluates them.
+Run limited Policy Head plus Role/Local Teacher training:
 
-Stage4 is a retired negative experiment and must not be used as a continuation checkpoint.
+```powershell
+.\.venv\Scripts\python.exe .\run_monobeast.py `
+  --config-name conv_teacher_joint_vs_first
+```
 
-## KL-APPO
+Run mixed-opponent log-scale continuation:
 
-The learner supports APPO clipped policy loss with V-trace targets, frozen reference-policy KL/BC, distinct optimizer groups, role codes in rollout buffers, and checkpointed Role/Local parameters. State-adaptive KL must be applied per state before reduction. Normal and small-map states retain the best-agent anchor; validated critical states may reduce the KL coefficient.
+```powershell
+.\.venv\Scripts\python.exe .\run_monobeast.py `
+  --config-name conv_teacher_mixed_logscale
+```
+
+Every continuation path must explicitly set `load_dir` and `checkpoint_file` to an available local checkpoint. Config paths document the original experiment layout and may need local path overrides.
+
+## Required Training Checks
 
 Monitor:
 
 - finite total, policy, baseline, KL, and BC losses;
-- `APPO invalid` and non-finite gradient count;
-- Teacher BC accuracy and KL by critical/non-critical state;
-- Role parameter and Local Delta changes;
+- `APPO invalid == 0` and finite gradients;
+- Teacher BC accuracy and KL divergence;
+- Role/Local/Head parameter deltas;
 - BUILD_CITY frequency;
-- actor/learner throughput and recoverable zero-SPS intervals.
+- map/opponent sampling counts;
+- actor/learner throughput and recoverable zero-SPS periods.
 
-A successful training log does not promote a checkpoint.
+`Learning finished` plus a final checkpoint makes the terminal CUDA IPC warning non-fatal. A successful training log never promotes a checkpoint.
 
-## Paired Evaluation Suites
+## Build The Final Routed Package
 
-Seeds are preregistered in `conf/evaluation/paired_seed_suites.yaml`:
-
-- Development: 6 seeds per map for frequent screening.
-- Promotion: 20 seeds per map after Development passes.
-- Holdout: 20 untouched seeds per map for final confirmation.
-
-Maps are 16, 24, and 32; every seed runs both player positions. Do not replace a difficult seed after seeing its result. Timeouts and invalid replay generation remain failures. Use a bounded outer timeout and one attempt.
-
-Example Development run:
+After locally packaging `role_05376_nofs`, `er100_35072`, and `log_03584` under `outputs/checkpoint_selection/agents/`:
 
 ```powershell
-& .\scripts\run_checkpoint_selection.ps1 `
-  -Phase repro `
-  -Checkpoints @("role_05376", "candidate") `
-  -Seeds @(175307220,391590161,784648117,971699130,296648577,971878553) `
-  -MapSizes @(16) `
-  -AgentTurnTimeoutMs 30000 `
-  -TimeoutSeconds 240 `
-  -MaxAttempts 1 `
-  -SkipPackaging
+.\.venv\Scripts\python.exe .\scripts\build_second_match_agent.py --force
 ```
 
-Run each map with its own registered seed list. Compare only matched conditions and report per map, side, opponent, timeout rate, win rate, city/unit margin, worst-night city loss, BUILD_CITY count, and first persistent divergence turn.
+The builder enforces:
 
-## Sidecar/Gate Research
+- Rot180 enabled;
+- Risk Gate disabled;
+- FuelStation absent;
+- Role bias disabled on 12x12;
+- route-specific model configs and checkpoints;
+- SHA256 manifest generation.
 
-The repository retains Sidecar BC, calibration, Step-0 equivalence, Gate-only APPO, progressive backbone migration, and PFSP code. These are reproducible research paths, not the current promoted deployment. Their checkpoints and replay products remain local and are never committed.
+The committed deployment can be used directly from:
+
+```text
+deployments/routed_teacher_final/
+```
+
+## Paired Evaluation
+
+Use both player positions, fixed seeds, one outer attempt, and explicit timeout reporting. Do not replace a difficult seed after observing its result.
+
+Final 10-seed validation against `first` used:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& {
+  & '.\scripts\generate_deployed_agent_replays.ps1' `
+    -CurrentAgent '.\deployments\routed_teacher_final' `
+    -OpponentNames @('first') `
+    -Seeds @(20260920,20260921,20260922,20260923,20260924,20260925,20260926,20260927,20260928,20260929) `
+    -MapSizes @(12,16,24,32) `
+    -Sides @(0,1) `
+    -OutputDir '.\outputs\checkpoint_selection\routed_teacher_final_vs_first_10seeds' `
+    -AgentTurnTimeoutMs 30000 `
+    -TimeoutSeconds 180 `
+    -MaxAttempts 1 `
+    -DisableRoleTrace `
+    -ContinueOnFailure
+}"
+```
+
+Report completed-game win rate, timeout rate, mean Score, city margin, unit margin, worst-night loss, and per-map/per-side results. Final Score is:
+
+```text
+Score = final city tiles + final units
+```
+
+The final test completed 73/80 games, won 38/73, and produced mean Score `150.49`, city margin `+7.86`, and unit margin `+8.26`. All seven failures occurred on 32x32.
+
+## Retired Directions
+
+- global full-frame BC after convergence;
+- global negative BUILD_CITY bias;
+- Stage4 Role curriculum checkpoints;
+- Sidecar/Gate enabled deployment without paired evidence;
+- promotion from unequal completed-game counts or training loss.
+
+These implementations may remain for research reproducibility, but their generated checkpoints and replay products are not repository assets.

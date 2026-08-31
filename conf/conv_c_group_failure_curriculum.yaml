@@ -1,0 +1,65 @@
+defaults:
+  - conv_role_local_stage3
+  - _self_
+
+name: conv_c_group_failure_curriculum
+group: c_group_failure_curriculum
+
+# Start from the certified role checkpoint. The backbone remains frozen; policy
+# and value heads, local role adapter, and 14 role biases train jointly.
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/role_only_repair
+checkpoint_file: 05376.pt
+weights_only: true
+
+role_local_training: false
+role_joint_head_training: true
+role_bias_training_enabled: true
+role_local_adapter_enabled: true
+
+# C lost most often on 24x24, while 12x12 remains a best-policy anchor.
+env_configuration:
+  width: 24
+  height: 24
+  loglevel: 0
+  trainingMapSizes: [12, 16, 24, 24, 24, 32, 32]
+  trainingMapSampling: random
+
+role_assignment:
+  enabled: true
+  bias_enabled: true
+  learnable_biases: false
+  cooldown_turns: 5
+  firefighter_override_cooldown: true
+  abandon_city_nights: 0.25
+  abandon_min_turn: 30
+  abandon_confirmation_turns: 3
+  abandon_max_cities: 1
+  abandon_max_fraction: 0.10
+  abandon_min_city_count: 3
+  abandon_min_fuel_distance: 6
+  abandon_rescue_distance: 6
+  bias_scale_by_map_size: {12: 0.20, 16: 0.60, 24: 0.50, 32: 0.40}
+
+algo: appo_vtrace
+use_teacher: true
+reference_policy_kl_cost: 0.02
+teacher_bc_cost_start: 0.08
+teacher_bc_cost_end: 0.05
+teacher_bc_anneal_games: 100
+
+policy_head_learning_rate: 1.0e-6
+role_local_learning_rate: 5.0e-6
+role_bias_learning_rate: 5.0e-6
+optimizer_kwargs:
+  lr: 1.0e-6
+  eps: 0.0003
+
+batch_size: 16
+total_games: 100
+checkpoint_freq: 5000
+console_log_interval: 15.0
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/c_group_failure_curriculum
+
+hydra:
+  run:
+    dir: outputs/c_group_failure_curriculum/${now:%Y-%m-%d_%H-%M-%S}

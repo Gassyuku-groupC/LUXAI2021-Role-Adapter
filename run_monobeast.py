@@ -98,6 +98,8 @@ def get_default_flags(flags: DictConfig) -> DictConfig:
     flags.setdefault("role_bias_learning_rate", 5e-6)
     flags.setdefault("role_local_learning_rate", 5e-6)
     flags.setdefault("policy_head_learning_rate", 1e-6)
+    flags.setdefault("backbone_tail_learning_rate", 2e-7)
+    flags.setdefault("role_joint_backbone_blocks", 0)
     flags.setdefault("role_small_map_policy_weight", 0.25)
     flags.setdefault("role_hard_window_start", 25)
     flags.setdefault("role_hard_window_weight", 2.0)

@@ -1,0 +1,38 @@
+defaults:
+  - conv_teacher_mixed_logscale
+  - _self_
+
+name: conv_teacher_edge_repair
+group: teacher_edge_repair
+
+load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_mixed_logscale
+checkpoint_file: 03584.pt
+weights_only: true
+
+teacher_load_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/checkpoint_selection/agents/log_03584/lux_ai/rl_agent
+teacher_checkpoint_file: candidate_weights.pt
+use_teacher: true
+reference_policy_kl_cost: 0.01
+teacher_bc_cost_start: 0.015
+teacher_bc_cost_end: 0.015
+teacher_bc_anneal_games: 1
+
+policy_head_learning_rate: 1.0e-6
+role_local_learning_rate: 1.0e-5
+role_bias_learning_rate: 1.0e-6
+rl_policy_cost: 0.75
+
+env_configuration:
+  width: 32
+  height: 32
+  loglevel: 0
+  trainingMapSizes: [12, 12, 12, 16, 24, 32, 32, 32]
+  trainingMapSampling: random
+
+total_games: 25
+checkpoint_freq: 2500
+checkpoint_dir: D:/Luxai/Kaggle_Lux_AI_2021/outputs/teacher_edge_repair
+
+hydra:
+  run:
+    dir: outputs/teacher_edge_repair/${now:%Y-%m-%d_%H-%M-%S}

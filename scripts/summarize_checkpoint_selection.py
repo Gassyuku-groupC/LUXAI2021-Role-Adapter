@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 
 PLAYER_SUFFIX = re.compile(r"_p([01])$")
 MAP_NAME = re.compile(r"map_(\d+)x\1_")
+OPPONENT_NAME = re.compile(r"_vs_(.+)_\d+_p[01]$")
 
 
 def candidate_player(path: Path) -> int:
@@ -25,6 +26,13 @@ def candidate_player(path: Path) -> int:
     if not match:
         raise ValueError(f"Cannot infer candidate side from {path.name}")
     return int(match.group(1))
+
+
+def opponent_name(path: Path) -> str:
+    match = OPPONENT_NAME.search(path.stem)
+    if not match:
+        raise ValueError(f"Cannot infer opponent from {path.name}")
+    return match.group(1)
 
 
 def build_city_count(replay: dict, player: int) -> int:
@@ -37,19 +45,33 @@ def build_city_count(replay: dict, player: int) -> int:
     )
 
 
-def load_games(root: Path) -> tuple[list[dict], dict[str, int], dict[tuple[str, int], int]]:
+def load_games(root: Path):
     games = []
     failures = defaultdict(int)
     failures_by_map = defaultdict(int)
-    for manifest_path in root.glob("*/manifest.json"):
+    failures_by_opponent = defaultdict(int)
+    failures_by_map_opponent = defaultdict(int)
+    manifest_paths = sorted(root.glob("*/manifest.json"))
+    root_manifest = root / "manifest.json"
+    if root_manifest.is_file():
+        manifest_paths.insert(0, root_manifest)
+    for manifest_path in manifest_paths:
         label = manifest_path.parent.name
         manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         manifest_failures = manifest.get("failures", [])
         failures[label] += len(manifest_failures)
         for failure in manifest_failures:
-            match = MAP_NAME.search(str(failure.get("name", "")))
-            if match:
-                failures_by_map[(label, int(match.group(1)))] += 1
+            name = str(failure.get("name", ""))
+            map_match = MAP_NAME.search(name)
+            opponent_match = OPPONENT_NAME.search(name)
+            if map_match:
+                map_size = int(map_match.group(1))
+                failures_by_map[(label, map_size)] += 1
+            if opponent_match:
+                opponent = opponent_match.group(1)
+                failures_by_opponent[(label, opponent)] += 1
+            if map_match and opponent_match:
+                failures_by_map_opponent[(label, map_size, opponent)] += 1
         for item in manifest.get("completed", []):
             replay_path = Path(item["replay"])
             if not replay_path.is_absolute():
@@ -64,6 +86,7 @@ def load_games(root: Path) -> tuple[list[dict], dict[str, int], dict[tuple[str, 
                 "map_size": int(item["map_size"]),
                 "seed": int(item["seed"]),
                 "side": player,
+                "opponent": opponent_name(replay_path),
                 "win": int(candidate["rank"] == 1),
                 "city_margin": candidate["city_tiles"] - opponent["city_tiles"],
                 "unit_margin": candidate["units"] - opponent["units"],
@@ -71,7 +94,40 @@ def load_games(root: Path) -> tuple[list[dict], dict[str, int], dict[tuple[str, 
                 "build_city_count": build_city_count(replay, player),
                 "turns": candidate["turns"],
             })
-    return games, failures, failures_by_map
+    return (
+        games,
+        failures,
+        failures_by_map,
+        failures_by_opponent,
+        failures_by_map_opponent,
+    )
+
+
+def aggregate_by_fields(games: list[dict], failures: dict, fields: tuple[str, ...]) -> list[dict]:
+    grouped = defaultdict(list)
+    for game in games:
+        grouped[(game["checkpoint"], *(game[field] for field in fields))].append(game)
+    rows = []
+    for key in sorted(set(grouped) | set(failures)):
+        checkpoint, *field_values = key
+        items = grouped[key]
+        completed = len(items)
+        failed = failures[key]
+        expected = completed + failed
+        row = {
+            "checkpoint": checkpoint,
+            **dict(zip(fields, field_values)),
+            "completed": completed,
+            "failed": failed,
+            "timeout_rate": failed / expected if expected else 1.0,
+            "win_rate": sum(x["win"] for x in items) / completed if completed else 0.0,
+            "mean_city_margin": sum(x["city_margin"] for x in items) / completed if completed else -999.0,
+            "mean_unit_margin": sum(x["unit_margin"] for x in items) / completed if completed else -999.0,
+            "worst_night_city_loss": max((x["worst_night_city_loss"] for x in items), default=999),
+            "build_city_per_game": sum(x["build_city_count"] for x in items) / completed if completed else 0.0,
+        }
+        rows.append(row)
+    return rows
 
 
 def aggregate_by_map(games: list[dict], failures: dict[tuple[str, int], int]) -> list[dict]:
@@ -143,13 +199,39 @@ def main() -> None:
     args = parser.parse_args()
     output = args.output_dir or args.root
     output.mkdir(parents=True, exist_ok=True)
-    games, failures, failures_by_map = load_games(args.root)
+    (
+        games,
+        failures,
+        failures_by_map,
+        failures_by_opponent,
+        failures_by_map_opponent,
+    ) = load_games(args.root)
     ranking = aggregate(games, failures)
     by_map = aggregate_by_map(games, failures_by_map)
-    (output / "summary.json").write_text(
-        json.dumps({"ranking": ranking, "by_map": by_map, "games": games}, indent=2), encoding="utf-8"
+    by_opponent = aggregate_by_fields(games, failures_by_opponent, ("opponent",))
+    by_map_opponent = aggregate_by_fields(
+        games, failures_by_map_opponent, ("map_size", "opponent")
     )
-    for name, rows in (("ranking.csv", ranking), ("ranking_by_map.csv", by_map), ("games.csv", games)):
+    (output / "summary.json").write_text(
+        json.dumps(
+            {
+                "ranking": ranking,
+                "by_map": by_map,
+                "by_opponent": by_opponent,
+                "by_map_opponent": by_map_opponent,
+                "games": games,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    for name, rows in (
+        ("ranking.csv", ranking),
+        ("ranking_by_map.csv", by_map),
+        ("ranking_by_opponent.csv", by_opponent),
+        ("ranking_by_map_opponent.csv", by_map_opponent),
+        ("games.csv", games),
+    ):
         if not rows:
             continue
         with (output / name).open("w", newline="", encoding="utf-8-sig") as handle:

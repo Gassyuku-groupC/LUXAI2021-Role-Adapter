@@ -1,0 +1,22 @@
+{
+  "fuel_station_enabled": false,
+  "identity": "second_match_agent",
+  "risk_gate_enabled": false,
+  "rot180": true,
+  "routes": {
+    "12": "map12 specialist",
+    "16": "role_05376_nofs",
+    "24": "log_03584",
+    "32": "role_05376_nofs"
+  },
+  "sha256": {
+    "base_checkpoint": "523d166361e18158ada242e3aa473b44323cb55f53ce152ca0dc7a948d887126",
+    "base_model_config": "4a9d44eb020aaf35855ba656e904ed4969d2faaabb18afcfd81a5d91dd8a4862",
+    "map12_checkpoint": "20a6fae90957b5632efe69042d1f31eaaaa87801063ce468747927dd41112831",
+    "map12_model_config": "d2558a95efc64cc74169d561c852c728aa1a9c4ac4ce9d61d83182e184568e9f",
+    "map24_checkpoint": "20ebc2570e58938fcaadb2116b89438706eec301aa4fdb53074f2d3ff55fc34d",
+    "map24_model_config": "d2558a95efc64cc74169d561c852c728aa1a9c4ac4ce9d61d83182e184568e9f",
+    "role_bias_config": "502524d3091b6d91b24b7e023e4f8b87abc8f0323393d0820a649ec081a874d9",
+    "runtime_config": "4d9c903bd5ef8aff3ddda888d12963478d85d0eff4f8a5bce497696ce8149bcd"
+  }
+}
