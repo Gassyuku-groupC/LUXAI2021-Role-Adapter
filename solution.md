@@ -1,5 +1,8 @@
 # Final Solution Overview
 
+[Project README](README.md) · [Documentation index](docs/README.md) ·
+[Deployment guide](docs/DEPLOYMENT.md)
+
 ## Summary
 
 The final Agent is `routed_teacher_final`: a self-contained Lux AI 2021 submission that selects a validated policy checkpoint by map size, applies Rot180 inference, and adds positive Role-City guidance on 16x16, 24x24, and 32x32.

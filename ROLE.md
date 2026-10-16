@@ -1,5 +1,8 @@
 # Role-City Adapter
 
+[Project README](README.md) · [Documentation index](docs/README.md) ·
+[Deployment guide](docs/DEPLOYMENT.md)
+
 ## Deployment Status
 
 Role-City is the central project contribution. It is enabled in the final `routed_teacher_final` package on 16x16, 24x24, and 32x32. The 12x12 route intentionally bypasses Role bias while retaining the same compatible runtime.
@@ -70,4 +73,14 @@ Global BUILD_CITY penalties and the Stage4 continuation are retired negative dir
 
 ## Visualization
 
-Replay generation may emit `*.roles.json` sidecars containing per-turn unit/city roles, cooldowns, changes, reasons, and bias status. The standalone Role-Colored Lux Viewer consumes those sidecars without changing official replay state.
+Replay generation may emit `*.roles.json` sidecars containing per-turn unit/city
+roles, cooldowns, changes, reasons, and bias status.
+
+- The [bundled viewer](tools/role_replay_viewer/README.md) loads a stateful replay
+  and its matching sidecar separately.
+- The separate [Role-Colored Lux Viewer](https://github.com/Gassyuku-groupC/Role-Colored-Lux-Viewer)
+  uses its merge script to embed sidecar frames into a command replay before
+  upload.
+
+See the [replay workflow](docs/DEPLOYMENT.md#role-replays). Both workflows add
+visual role information without changing gameplay commands.

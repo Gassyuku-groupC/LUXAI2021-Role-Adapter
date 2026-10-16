@@ -1,5 +1,8 @@
 # Methodology
 
+[Project README](README.md) · [Documentation index](docs/README.md) ·
+[Training guide](TRAINING.md)
+
 ## Evidence Status
 
 The final evaluated Agent is `routed_teacher_final`, not a single checkpoint. It routes map sizes to three validated policy checkpoints while preserving one shared runtime implementation and Role configuration.
@@ -11,7 +14,9 @@ The final evaluated Agent is `routed_teacher_final`, not a single checkpoint. It
 | 24x24 | `log_03584` | Rot180 plus positive Role guidance |
 | 32x32 | `role_05376_nofs` | Rot180 plus positive Role guidance |
 
-The deployment hashes and route definitions are recorded in `deployments/routed_teacher_final/PACKAGE_MANIFEST.json` and `SECOND_MATCH_AGENT.json`.
+The deployment hashes and route definitions are recorded in
+[PACKAGE_MANIFEST.json](deployments/routed_teacher_final/PACKAGE_MANIFEST.json)
+and [SECOND_MATCH_AGENT.json](deployments/routed_teacher_final/SECOND_MATCH_AGENT.json).
 
 ## Base Actor And Routing
 
